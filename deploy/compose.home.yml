@@ -1,0 +1,33 @@
+name: easphub-plan-review-home
+services:
+  database:
+    extends: {file: compose.yml, service: database}
+  web:
+    extends: {file: compose.yml, service: web}
+    environment:
+      DEPLOY_ENV: home
+    networks:
+      app-private: {}
+      proxy-net:
+        aliases: [plan-review-home-web]
+  worker:
+    extends: {file: compose.yml, service: worker}
+    environment:
+      DEPLOY_ENV: home
+  migrate:
+    extends: {file: compose.yml, service: migrate}
+    environment:
+      DEPLOY_ENV: home
+networks:
+  proxy-net:
+    external: true
+    name: proxy-net
+  app-private:
+    internal: true
+secrets:
+  database_password:
+    file: ${DATABASE_PASSWORD_FILE:?Set an external secret file path}
+  database_root_password:
+    file: ${DATABASE_ROOT_PASSWORD_FILE:?Set an external secret file path}
+  mysql_client:
+    file: ${MYSQL_CLIENT_FILE:?Set an external secret file path}

@@ -1,0 +1,7 @@
+# External secret file; never use this placeholder verbatim.
+# Set the same password as database_password. Keep mode 0600.
+[client]
+user=plan_review
+password="REPLACE_WITH_A_REAL_SECRET"
+host=127.0.0.1
+protocol=tcp

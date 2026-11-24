@@ -1,0 +1,16 @@
+services:
+  database:
+    image: ${MYSQL_IMAGE:?Missing offline MySQL image}
+    pull_policy: never
+  web:
+    pull_policy: never
+    ports:
+      - "127.0.0.1:${HTTP_PORT:?Missing loopback port}:3350"
+  worker:
+    pull_policy: never
+  migrate:
+    pull_policy: never
+networks:
+  proxy-net:
+    external: true
+    name: ${PROXY_NETWORK:?Missing proxy network name}

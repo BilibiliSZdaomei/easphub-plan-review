@@ -1,0 +1,103 @@
+# Common definitions only. Use compose.home.yml or compose.company.yml.
+x-app: &app
+  image: ${APP_IMAGE:?Set the actual built immutable application image reference}
+  platform: linux/amd64
+  user: "10001:10001"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  mem_limit: 1g
+  cpus: 1.0
+  tmpfs: ["/tmp:size=256m,mode=1777"]
+  restart: unless-stopped
+  stop_grace_period: 40s
+  environment: &environment
+    APP_BASE_PATH: /apps/plan-review
+    APP_DATA_DIR: /app/data
+    TZ: ${TZ:?Set the business timezone}
+    PLAN_REVIEW_DB_HOST: database
+    PLAN_REVIEW_DB_NAME: plan_review
+    PLAN_REVIEW_DB_USER: plan_review
+    PLAN_REVIEW_DB_PASSWORD_FILE: /run/secrets/database_password
+    PLAN_REVIEW_DEMO: "0"
+    PLAN_REVIEW_WORKER: "0"
+    HOST: 0.0.0.0
+    PORT: "3350"
+  secrets: [database_password]
+  volumes:
+    - type: bind
+      source: ${APP_DATA_HOST_PATH:?Set the environment-specific application data path}
+      target: /app/data
+      bind: {create_host_path: false}
+  networks: [app-private]
+  logging: &logging
+    driver: json-file
+    options: {max-size: "20m", max-file: "5"}
+services:
+  database:
+    image: mysql:8.4.8@sha256:4fc4bca5a26c5aa2246a92779d238bc2d34f0373e65dc083d7b635b02780dd3d
+    platform: linux/amd64
+    # Official entrypoint initializes/chowns as root then drops to mysql.
+    # Confirm the image's mysql UID/GID before preparing this bind mount.
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1536m
+    cpus: 1.0
+    tmpfs: ["/tmp:size=128m,mode=1777", "/var/run/mysqld:size=16m,mode=1777"]
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_0900_bin]
+    environment:
+      MYSQL_DATABASE: plan_review
+      MYSQL_USER: plan_review
+      MYSQL_PASSWORD_FILE: /run/secrets/database_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/database_root_password
+      TZ: ${TZ:?Set the business timezone}
+    secrets: [database_password, database_root_password, mysql_client]
+    volumes:
+      - type: bind
+        source: ${MYSQL_DATA_HOST_PATH:?Set the environment-specific MySQL data path}
+        target: /var/lib/mysql
+        bind: {create_host_path: false}
+    networks: [app-private]
+    healthcheck:
+      test: [CMD, mysql, --defaults-extra-file=/run/secrets/mysql_client, --connect-timeout=3, --batch, --skip-column-names, --execute=SELECT 1, plan_review]
+      interval: 20s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging: *logging
+  web:
+    <<: *app
+    expose: ["3350"]
+    depends_on: {database: {condition: service_healthy}}
+    networks: {app-private: {}, proxy-net: {}}
+    healthcheck:
+      test: [CMD, python, scripts/healthcheck.py, ready]
+      interval: 20s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+  worker:
+    <<: *app
+    mem_limit: 1536m
+    command: [python, scripts/run_worker.py]
+    depends_on: {database: {condition: service_healthy}}
+    healthcheck:
+      test: [CMD, python, scripts/healthcheck.py, worker]
+      interval: 20s
+      timeout: 8s
+      start_period: 30s
+      retries: 3
+  migrate:
+    <<: *app
+    profiles: [operations]
+    command: [python, -m, alembic, upgrade, head]
+    restart: "no"
+    healthcheck: {disable: true}
+    depends_on: {database: {condition: service_healthy}}

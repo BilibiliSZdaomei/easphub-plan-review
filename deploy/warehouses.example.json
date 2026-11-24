@@ -1,0 +1,12 @@
+[
+  {"code":"NL_MAIN","name":"荷兰中心仓","market":"NL"},
+  {"code":"UK_MAIN","name":"英国中心仓","market":"UK"},
+  {"code":"DE_NSC","name":"德国仓","market":"DE"},
+  {"code":"IT_NSC","name":"意大利仓","market":"IT"},
+  {"code":"FR_NSC","name":"法国仓","market":"FR"},
+  {"code":"ES_NSC","name":"西班牙 NSC 仓","market":"ES"},
+  {"code":"PL_NSC","name":"波兰仓","market":"PL"},
+  {"code":"CH_NSC","name":"瑞士仓","market":"CH"},
+  {"code":"SE_NSC","name":"瑞典仓","market":"SE"},
+  {"code":"UZ_NSC","name":"乌兹别克斯坦仓","market":"UZ"}
+]

@@ -1,0 +1,5 @@
+# Keep the existing business dependencies and verified versions.
+-r requirements.txt
+-c requirements-lock.txt
+# MySQL 8 caching_sha2_password support, without changing authentication policy.
+pymysql[rsa]==1.1.1
