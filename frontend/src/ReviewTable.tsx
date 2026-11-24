@@ -69,7 +69,7 @@ export function ColumnPicker({columns,visible,onChange,disabled}:{columns:Column
  </details>
 }
 
-export default function ReviewTable({ver,visible,state,onState,editable,dirty,busy=false,selected,setSelected,edits,setNumber,onDetail}:{ver:any;visible:string[];state:TableState;onState:(s:TableState)=>void;editable:boolean;dirty:boolean;busy?:boolean;selected:Set<string>;setSelected:(fn:(s:Set<string>)=>Set<string>)=>void;edits:any;setNumber:(id:string,key:string,value:string)=>void;onDetail:(r:any)=>void}){
+export default function ReviewTable({ver,visible,state,onState,editable,reviewing,dirty,busy=false,selected,setSelected,edits,setNumber,onDetail}:{ver:any;visible:string[];state:TableState;onState:(s:TableState)=>void;editable:boolean;reviewing:boolean;dirty:boolean;busy?:boolean;selected:Set<string>;setSelected:(fn:(s:Set<string>)=>Set<string>)=>void;edits:any;setNumber:(id:string,key:string,value:string)=>void;onDetail:(r:any)=>void}){
  const [filterCol,setFilterCol]=useState<Column|null>(null)
  const catalog:Column[] = ver.columns || []
  const orderedKeys = withMaterialColumns(visible)
@@ -91,7 +91,11 @@ export default function ReviewTable({ver,visible,state,onState,editable,dirty,bu
   if(editable&&['sea_plan_qty','air_plan_qty'].includes(col.key))return <input className={'quantity-input '+(edits[row.id]?.[col.key]!==undefined?'edited':'')} aria-label={i.material_code+' '+col.label} disabled={busy} type="number" min="0" step={i.quantity_step||1} value={edits[row.id]?.[col.key]??i[col.key]??''} onChange={e=>setNumber(row.id,col.key,e.target.value)}/>
   if(['on_hand_months','pipeline_days','future_days'].includes(col.key)&&row.result.m==='0'&&'advice' in row.result)return <span className="muted">无销量</span>
   if(col.key==='status'){const r=row.result;return <><Badge value={['ERROR','PENDING'].includes(r.data_status)?r.data_status:r.review_mode==='AUTO'?r.quantity_status:r.review_mode}/>{r.delay_replenishment&&<small className="text-coral">建议延迟补货</small>}</>}
-  if(col.key==='decision')return d?<Badge value={d.status} label={v}/>:<span className="muted">{v}</span>
+  if(col.key==='decision'){
+   const reason=row.return_requested?row.return_reason:d?.reason
+   return <>{d?<Badge value={d.status} label={v}/>:row.return_requested?<Badge value="RETURNED" label="需修改"/>:<span className="muted">{v}</span>}
+    {reason&&<small className="decision-reason" title={reason}>{reason}</small>}</>
+  }
   if(col.key==='replacement_rate')return v==null?'—':fmt(Number(v)*100)+'%'
   if(col.type==='number')return <span className="mono">{fmt(v)}</span>
   return <span className={['reason','air_reason','attention'].includes(col.key)?'clipped-cell':''} title={String(v??'')}>{v==null||v===''?'—':String(v)}</span>
@@ -106,7 +110,7 @@ export default function ReviewTable({ver,visible,state,onState,editable,dirty,bu
   <div className="table-scroll plan-scroll">
    <table className="plan-table expanded-table" aria-label="计划物料">
     <thead><tr>
-     <th className="check-cell"><input type="checkbox" aria-label="选择当前页" disabled={busy||!ver.items.length} checked={pageSelected} ref={el=>{if(el)el.indeterminate=pageMixed}} onChange={e=>selectPage(e.target.checked)}/></th>
+     {(editable||reviewing)&&<th className="check-cell"><input type="checkbox" aria-label="选择当前页" disabled={busy||!ver.items.length} checked={pageSelected} ref={el=>{if(el)el.indeterminate=pageMixed}} onChange={e=>selectPage(e.target.checked)}/></th>}
      {columns.map(c=><th key={c.key} scope="col" className={columnClass(c)} aria-sort={state.sortKey===c.key?state.sortDirection==='asc'?'ascending':'descending':'none'}>
       <div className="table-column-head">
        <button disabled={locked} onClick={()=>sort(c.key)} title="切换排序" aria-label={'排序 '+c.label}>{c.label}
@@ -118,10 +122,10 @@ export default function ReviewTable({ver,visible,state,onState,editable,dirty,bu
      <th scope="col" aria-label="操作"/>
     </tr></thead>
     <tbody>{ver.items.map((r:any)=><tr key={r.id} className={selected.has(r.id)?'selected':''}>
-     <td className="check-cell"><input type="checkbox" aria-label={'选择 '+r.input.material_code} disabled={busy} checked={selected.has(r.id)} onChange={e=>{
+     {(editable||reviewing)&&<td className="check-cell"><input type="checkbox" aria-label={'选择 '+r.input.material_code} disabled={busy} checked={selected.has(r.id)} onChange={e=>{
       const checked=e.target.checked
       setSelected(current=>{const next=new Set(current);if(checked)next.add(r.id);else next.delete(r.id);return next})
-     }}/></td>
+     }}/></td>}
      {columns.map(c=><td key={c.key} className={columnClass(c)}>{cell(r,c)}</td>)}
      <td><button className="text-button" disabled={locked} onClick={()=>onDetail(r)} aria-label={'查看 '+r.input.material_code}>查看<ExternalLink size={12}/></button></td>
     </tr>)}</tbody>

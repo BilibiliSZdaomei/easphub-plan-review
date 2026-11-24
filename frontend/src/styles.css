@@ -858,3 +858,14 @@ td small span, .plan-table .material-col small span { color: var(--ea-muted); }
   .plan-table-panel .expanded-table :is(td, th).material-col { left: auto; }
   .plan-table-panel .expanded-table td.material-col { position: static; }
 }
+
+.review-outcomes { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
+.review-outcomes legend { color: var(--ea-secondary); margin-bottom: 8px; font-weight: 600; }
+.review-outcomes > div { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; }
+.review-form .review-outcomes label { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 0; min-height: 36px; color: var(--ea-secondary); background: var(--ea-subtle); border: 1px solid var(--ea-border); border-radius: 8px; cursor: pointer; }
+.review-form .review-outcomes input { width: 13px; height: 13px; min-height: 0; margin: 0; accent-color: var(--ea-action); }
+.review-form .review-outcomes .chosen { color: var(--ea-action); background: var(--ea-selection); border-color: var(--ea-action); }
+.decision-box.rejected, .badge.rejected { color: var(--ea-danger); background: var(--ea-danger-soft); }
+.decision-box.returned, .badge.partially_approved { color: var(--ea-warning); background: var(--ea-warning-soft); }
+.plan-table .decision-reason { display: block; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ea-secondary); }
+@media(max-width: 450px){.review-outcomes > div { grid-template-columns: repeat(2,minmax(0,1fr)); }}

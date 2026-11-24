@@ -4,7 +4,7 @@ import {api,flagLabels} from './api'
 import {Modal,Notice,Busy,useFormExit} from './ui'
 
 type IssueRow = {id:string; material_code:string; material_name:string; issues:{message:string}[]; flags:string[]}
-type Report = {revision:number; total:number; unreviewed:number; affected_count:number; error_rows:number; air_rows:number; rows:IssueRow[]; issue_hash:string}
+type Report = {revision:number; total:number; unreviewed:number; rejected:number; affected_count:number; error_rows:number; air_rows:number; rows:IssueRow[]; issue_hash:string}
 
 function IssueList({report,disabled,onItem}:{report:Report;disabled:boolean;onItem:(row:string,ids:string[])=>void}){
   const [page,setPage]=useState(1)
@@ -61,7 +61,7 @@ export default function ConfirmationDialog({kind,ver,onClose,onConfirm,onItem}:{
   return <Modal title={submitting?'提交复审':'完成终审'} onClose={close} wide><form className="modal-body" onSubmit={confirm}>
     {error&&<Notice message={error} tone="error"/>}
     {!report?(error?<button type="button" className="text-button" onClick={()=>setAttempt(n=>n+1)}>刷新提醒</button>:<Busy/>):<>
-      <p>第 {ver.seq} 版，共 <strong>{report.total}</strong> 行。{submitting?'提交后由复审人员处理。':'确认后整份计划通过终审。'}</p>
+      <p>第 {ver.seq} 版，共 <strong>{report.total}</strong> 行。{submitting?'提交后由本仓复审人员领取。':`本次结案：通过 ${report.total-report.rejected} 行，不批准 ${report.rejected} 行。`}</p>
       {!ver.snapshot&&<Notice message="本版采用人工复审，库存、周转和补货区间均未计算。" tone="info"/>}
       {hasIssues&&<Notice message={`其中 ${report.affected_count} 行有审核提醒，可继续${submitting?'提交':'终审'}。`}/>}
       {!submitting&&report.unreviewed>0&&<p className="muted">{report.unreviewed} 行尚未单独复审，将记为「整批通过」。</p>}

@@ -20,6 +20,12 @@ def clients(test_database_path):
 def post(c,path,data,key=None):
     return c.post(P+path,json=data,headers={'Idempotency-Key':key or uuid.uuid4().hex})
 
+def claim(c,path):
+    revision=c.get(P+path).json()['revision']
+    claimed=post(c,path+'/claim',{'revision':revision})
+    assert claimed.status_code==200,claimed.text
+    return c.get(P+path).json()
+
 def test_success_response_waits_for_durable_commit(clients):
     from backend.db import SessionLocal, Mapping
     from sqlalchemy import select
@@ -87,20 +93,20 @@ def test_submit_with_warnings_is_idempotent_and_locks_version(clients):
 def test_full_review_return_resubmit_approve(clients):
     p,r,a,s=clients;b,v=ready(p)
     assert post(p,'/versions/'+v['id']+'/submit',{'revision':v['revision']}).status_code==200
-    rv=r.get(P+'/versions/'+v['id']).json()
+    rv=claim(r,'/versions/'+v['id'])
     ids=[i['id'] for i in rv['items']]
     reviewed=post(r,'/versions/'+v['id']+'/reviews',{'revision':rv['revision'],'ids':ids,'decision':'APPROVED'})
     assert reviewed.status_code==200 and reviewed.json()['count']==len(ids) and not reviewed.json()['skipped']
     rv=r.get(P+'/versions/'+v['id']).json()
     assert post(r,'/versions/'+v['id']+'/finalize',{'revision':rv['revision']-1}).status_code==409
-    returned=post(r,'/versions/'+v['id']+'/return',{'revision':rv['revision'],'reason':'请核对空运数量'})
+    returned=post(r,'/versions/'+v['id']+'/return',{'revision':rv['revision'],'ids':ids,'reason':'请核对空运数量'})
     assert returned.status_code==200,returned.text
     new_id=returned.json()['version_id'];nv=p.get(P+'/versions/'+new_id).json()
     assert nv['seq']==2 and all(i['decision'] is None for i in nv['items'])
     assert p.get(P+'/versions/'+v['id']).json()['state']=='RETURNED'
     assert p.get(P+'/batches/'+b['id']).json()['state']=='RETURNED'
     assert post(p,'/versions/'+new_id+'/submit',{'revision':nv['revision']}).status_code==200
-    rv=r.get(P+'/versions/'+new_id).json()
+    rv=claim(r,'/versions/'+new_id)
     result=post(r,'/versions/'+new_id+'/reviews',{'revision':rv['revision'],'ids':[i['id'] for i in rv['items']],'decision':'EXCEPTION_APPROVED','reason_code':'特殊物料','reason':'逐项核实真实需求','ack_flags':['MANUAL','COLLISION','MISSING_RATE','NO_SEA_RANGE','ABC_MISSING'],'air_confirmed':True})
     assert result.status_code==200 and not result.json()['skipped'],result.text
     final=post(r,'/versions/'+new_id+'/finalize',{'revision':result.json()['revision']})

@@ -26,7 +26,8 @@ export async function waitJob(id:string,onState?:(state:any)=>void){
   }
   throw new Error('任务仍在处理中，请稍后重新查看')
 }
-export const labels:Record<string,string>={DRAFT:'草稿',SUBMITTED:'待复审',IN_REVIEW:'复审中',RETURNED:'已退回',APPROVED:'已通过',VOID:'已作废',WITHIN:'合理',BELOW:'偏少',ABOVE:'偏多',ERROR:'数据错误',WARNING:'需关注',VALID:'有效',PENDING:'待补数据',MANUAL:'人工判断',EXEMPT:'免数量审核',UNAVAILABLE:'无法计算',NOT_APPLICABLE:'不适用',BATCH_APPROVED:'整批通过',EXCEPTION_APPROVED:'例外批准'}
+export const completedStates = ['APPROVED','PARTIALLY_APPROVED','REJECTED']
+export const labels:Record<string,string>={DRAFT:'草稿',SUBMITTED:'待复审',IN_REVIEW:'复审中',RETURNED:'已退回',APPROVED:'已通过',PARTIALLY_APPROVED:'部分通过',REJECTED:'不批准',VOID:'已作废',WITHIN:'合理',BELOW:'偏少',ABOVE:'偏多',ERROR:'数据错误',WARNING:'需关注',VALID:'有效',PENDING:'待补数据',MANUAL:'人工判断',EXEMPT:'免数量审核',UNAVAILABLE:'无法计算',NOT_APPLICABLE:'不适用',BATCH_APPROVED:'整批通过',EXCEPTION_APPROVED:'例外批准'}
 export const flagLabels:Record<string,string>={AIR:'需确认空运',COLLISION:'分类重叠',MISSING_RATE:'缺更换率',NO_SEA_RANGE:'仅减海运无法达标',ABC_MISSING:'分类缺失',MANUAL:'市场需求判断'}
 export const reasonLabels=new Map([
   ['市场需求变化','预计用量有变化'],

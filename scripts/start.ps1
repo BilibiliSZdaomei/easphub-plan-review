@@ -46,7 +46,8 @@ function Test-V2Frontend([string]$Directory) {
     if (-not (Test-Path -LiteralPath $manifest) -or -not (Test-Path -LiteralPath (Join-Path $Directory 'index.html'))) { return $false }
     try {
         $build = Get-Content -LiteralPath $manifest -Raw -Encoding utf8 | ConvertFrom-Json
-        return $build.review_model -eq 'V2' -and $build.market_scope -eq 'EUROPE' -and $build.account_mode -eq 'managed' -and $build.ui_revision -eq 5
+        $expected = Get-Content -LiteralPath (Join-Path $projectPath 'frontend\package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        return $build.version -eq $expected.version -and $build.review_model -eq 'V2' -and $build.market_scope -eq 'EUROPE' -and $build.account_mode -eq 'managed' -and $build.ui_revision -eq 5
     }
     catch { return $false }
 }

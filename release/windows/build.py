@@ -64,6 +64,9 @@ def build(args):
     source = args.source.resolve()
     ui = args.ui.resolve()
     manifest = json.loads((ui/'app-build.json').read_text(encoding='utf-8-sig'))
+    source_version = json.loads((source/'frontend/package.json').read_text(encoding='utf-8-sig'))['version']
+    if not (manifest.get('version') == source_version == args.version):
+        raise ValueError('Frontend build, source and release versions must match')
     if manifest['base_path'] != '/plan-review' or manifest['account_mode'] != 'managed':
         raise ValueError('Expected a managed /plan-review frontend')
     output = args.output.resolve()
@@ -157,8 +160,9 @@ def build(args):
                 add_file(z,source/'scripts'/filename,'scripts/'+filename,windows_text=True)
             for filename in ('Start.cmd','Admin.cmd','README.windows.txt'):
                 add_file(z,launcher/filename,filename,windows_text=True)
+            add_file(z,launcher/'Verify.cmd','Verify.cmd',windows_text=True)
             add_file(z,launcher/'Admin.cmd','查看初始管理员.cmd',windows_text=True)
-            for filename in ('start.ps1','runtime.ps1','portable-server.py'):
+            for filename in ('start.ps1','verify-package.ps1','runtime.ps1','portable-server.py'):
                 add_file(z,launcher/filename,'scripts/'+filename,windows_text=filename.endswith('.ps1'))
             z.writestr(prefix+'versions.json',json.dumps({
                 'version':args.version,'platform':'windows-x64','python':PYTHON_VERSION,
@@ -166,6 +170,12 @@ def build(args):
                 'requirements_lock_sha256':sha256(lock.read_bytes()).hexdigest(),
                 'packages':{name:dist.version for name,dist in sorted(distros.items())}
             },indent=2)+'\n')
+        with zipfile.ZipFile(temp, 'a', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            files = {}
+            for entry in z.infolist():
+                with z.open(entry) as content:
+                    files[entry.filename.removeprefix(prefix)] = sha256(content.read()).hexdigest()
+            z.writestr(prefix+'package-files.json',json.dumps(files,ensure_ascii=True,sort_keys=True)+'\n')
         temp.replace(output)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -178,5 +188,5 @@ if __name__ == '__main__':
     parser.add_argument('--ui', type=Path, required=True)
     parser.add_argument('--python-archive',type=Path,required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--version', default='2.0.0')
+    parser.add_argument('--version', default='2.1.0')
     build(parser.parse_args())

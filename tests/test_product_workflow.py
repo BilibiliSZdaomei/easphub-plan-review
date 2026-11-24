@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from backend.comparison import compare_items
 from backend.db import Audit, Notification, Rule, SessionLocal, Snapshot, User, Version, uid
 from backend.rules import fingerprint
-from test_api import P, clients, current, post, ready
+from test_api import P, clients, current, post, ready, claim
 from test_data import upload, csvfile
 
 
@@ -129,10 +129,10 @@ def test_switch_in_returned_draft_preserves_history_and_plan_source(clients):
         db.commit()
     revision = planner.get(P+old_path).json()['revision']
     assert post(planner,old_path+'/submit',{'revision':revision}).status_code == 200
-    pending = reviewer.get(P+old_path).json()
+    pending = claim(reviewer,old_path)
     reviewed = post(reviewer,old_path+'/reviews',{'revision':pending['revision'],'ids':[items[0]['id']],'decision':'APPROVED'})
     assert reviewed.status_code == 200 and reviewed.json()['count'] == 1
-    returned = post(reviewer,old_path+'/return',{'revision':reviewed.json()['revision'],'reason':'更新快照'})
+    returned = post(reviewer,old_path+'/return',{'revision':reviewed.json()['revision'],'ids':[items[1]['id']],'reason':'更新快照'})
     assert returned.status_code == 200
     new_path = '/versions/'+returned.json()['version_id']
     draft = planner.get(P+new_path).json()

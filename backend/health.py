@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import inspect, text
 from .db import engine, Base, ROOT, DATA, SCHEMA_REVISION
 from .settings import BASE_PATH, DEPLOY_ENV
+from .template_assets import WORKBOOK_TEMPLATES
 
 UI_DIR = Path(os.environ.get('PLAN_REVIEW_UI_DIR', str(ROOT/'frontend'/'dist')))
 
@@ -24,6 +25,9 @@ def check_database():
 
 
 def check_files():
+    for path, _ in WORKBOOK_TEMPLATES.values():
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError("workbook template missing: " + path.name)
     with tempfile.TemporaryFile(dir=DATA/'files') as probe:
         probe.write(b'readiness'); probe.flush(); probe.seek(0)
         if probe.read() != b'readiness':

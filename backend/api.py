@@ -39,7 +39,7 @@ async def lifespan(app):
         workers[0].set()
         for t in workers[1]:t.join(timeout=2)
 
-app=FastAPI(title='计划审核',version='2.0.0',lifespan=lifespan,docs_url=BASE_PATH+'/api/docs' if DEPLOY_ENV=='local' else None,openapi_url=BASE_PATH+'/api/openapi.json',redoc_url=None)
+app=FastAPI(title='计划审核',version='2.1.0',lifespan=lifespan,docs_url=BASE_PATH+'/api/docs' if DEPLOY_ENV=='local' else None,openapi_url=BASE_PATH+'/api/openapi.json',redoc_url=None)
 PREFIX=API_PREFIX
 
 @app.middleware('http')
@@ -86,7 +86,7 @@ async def business_error(request,exc):
 @app.get(PREFIX+'/health')
 def health():
     ready=readiness()
-    return JSONResponse({'status':'ok' if ready else 'not_ready','app':'plan-review','version':'2.0.0','demo':DEMO,'database':engine.dialect.name},status_code=200 if ready else 503)
+    return JSONResponse({'status':'ok' if ready else 'not_ready','app':'plan-review','version':'2.1.0','demo':DEMO,'database':engine.dialect.name},status_code=200 if ready else 503)
 
 @app.get('/health/live')
 def health_live():return {'status':'ok','app':'plan-review'}
@@ -182,7 +182,7 @@ def version_activity(version_id:str,page:int=1,ctx=Depends(context,scope="functi
     items=[]
     for event,actor in db.execute(events):
         detail=event.detail or {}
-        record={key:detail[key] for key in ('reason','decision','rows','count','approved','batch_approved','warning_rows','filtered','source_number','source_seq','material_codes') if key in detail}
+        record={key:detail[key] for key in ('reason','decision','rows','count','approved','rejected','batch_approved','warning_rows','filtered','source_number','source_seq','material_codes','reviewer_name','from_reviewer_name') if key in detail}
         if 'changes' in detail:record['count']=len(detail['changes'])
         if 'ids' in detail:record['selected_count']=len(detail['ids'])
         if detail.get('override'):record['reason']=detail['override'].get('reason')
@@ -196,6 +196,7 @@ def get_version(version_id:str,q:str='',filter:str='all',page:int=1,page_size:in
     page_size=max(1,min(page_size,100));page=max(page,1)
     rule=db.get(Rule,ver.rule_id);snap=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None;latest_rule=svc.active_rule(db,batch.warehouse)
     return {'id':ver.id,'seq':ver.seq,'revision':ver.revision,'state':ver.state,'batch_id':batch.id,'owner':batch.owner,
+            **svc.assignment(db,batch,ver),
             **({'batch_current_id':batch.current_id,'batch_state':batch.state,'batch_updated_at':batch.updated_at} if include_batch_context else {}),
             'items':[{**r,'table_values':display_row(r,ver.state)} for r in rows[(page-1)*page_size:page*page_size]],'total':len(rows),'summary':svc.summary(ver.items),
             'columns':[{'key':k,'label':label,'type':t} for k,label,t in COLUMNS],'column_options':column_options(ver.items,ver.state),
@@ -247,6 +248,18 @@ def review_summary(version_id:str,data:dict,ctx=Depends(context,scope="function"
         summary.update(preserved=len(selected)-len(rows), errors=sum(r['result']['data_status']=='ERROR' for r in rows),
                        delayed=sum(r['result'].get('delay_replenishment') is True for r in rows))
     return summary
+
+@app.get(PREFIX+'/versions/{version_id}/reviewers')
+def review_candidates(version_id:str,ctx=Depends(context,scope="function")):
+    db,user=ctx
+    role(user,'REVIEWER')
+    batch,ver=svc.version_access(db,user,version_id,lock=False)
+    svc.demand(ver.state in svc.ACTIVE_REVIEW_STATES and batch.current_id==ver.id,'当前版本不在复审中',409)
+    svc.demand(svc.eligible_reviewer(user,batch),'没有本计划的复审权限',403)
+    candidates=db.scalars(select(User).where(User.active.is_(True)).order_by(User.name,User.username))
+    return [{'id':u.id,'name':u.name,'username':u.username} for u in candidates
+            if u.id!=ver.reviewer_id and svc.eligible_reviewer(u,batch)]
+
 @app.post(PREFIX+'/versions/{version_id}/items')
 def append_rows(version_id:str,data:dict,ctx=Depends(context,scope="function")):
     return svc.add_items(*ctx,version_id,data)
@@ -266,7 +279,7 @@ def action_route(action):
         db,user=ctx
         return once(db,user,request,data,lambda:action(db,user,version_id,data))
     return endpoint
-for name,fn in [('submit',svc.submit),('reviews',svc.review),('finalize',svc.finalize),('return',svc.return_batch)]:
+for name,fn in [('submit',svc.submit),('claim',svc.claim),('transfer',svc.transfer),('reviews',svc.review),('finalize',svc.finalize),('return',svc.return_batch)]:
     app.add_api_route(PREFIX+'/versions/{version_id}/'+name,action_route(fn),methods=['POST'])
 
 @app.post(PREFIX+'/batches/{batch_id}/copy')

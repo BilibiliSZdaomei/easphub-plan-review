@@ -24,6 +24,8 @@ def confirmation(rows,stage,revision,all_rows=False):
         issues=business_warnings(row)
         if issues:affected.append({'id':row['id'],'material_code':row['input']['material_code'],'material_name':row['input'].get('material_name',''),'issues':issues,'flags':row['result']['manual_flags'],'data_error':row['result']['data_status']=='ERROR'})
     return {'stage':stage,'revision':revision,'total':len(rows),'unreviewed':sum(not r.get('decision') for r in rows),'affected_count':len(affected),'issue_count':sum(len(r['issues']) for r in affected),
+            'rejected':sum((r.get('decision') or {}).get('status')=='REJECTED' for r in rows),
+            'return_marked':sum((r.get('decision') or {}).get('status')=='RETURNED' for r in rows),
             'error_rows':sum(r['data_error'] for r in affected),'air_rows':sum('AIR' in r['flags'] for r in affected),
             'rows':affected if all_rows else affected[:100],'truncated':not all_rows and len(affected)>100,
             'issue_hash':fingerprint({'stage':stage,'revision':revision,'rows':affected})}

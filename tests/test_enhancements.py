@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from openpyxl import load_workbook
 from fastapi import HTTPException
-from test_api import clients,post,current,P
+from test_api import clients,post,current,P,claim
 from test_data import upload,csvfile
 from test_rules import row
 from backend.rules import calculate,default_package
@@ -54,15 +54,18 @@ def test_review_decision_filter_and_selection_use_the_displayed_version(clients)
         workbook=load_workbook(BytesIO(export_workbook(payload)),data_only=True)
         assert {row[16] for row in list(workbook.active.values)[1:]}=={'未提交'}
         workbook.close()
-    result=post(planner,path+'/submit',{'revision':draft['revision']}).json()
+    assert post(planner,path+'/submit',{'revision':draft['revision']}).status_code==200
+    result=claim(reviewer,path)
     check(reviewer,path,'待复审',row_ids)
     first=draft['items'][0]['id']
     reviewed=post(reviewer,path+'/reviews',{'revision':result['revision'],'ids':[first],'decision':'APPROVED'}).json()
     check(reviewer,path,'已批准',{first})
-    returned=post(reviewer,path+'/return',{'revision':reviewed['revision'],'reason':'调整数量'}).json()
-    check(reviewer,path,'未复审',row_ids-{first})
+    second=next(i for i in row_ids if i!=first)
+    returned=post(reviewer,path+'/return',{'revision':reviewed['revision'],'reason':'调整数量','ids':[second]}).json()
+    check(reviewer,path,'未复审',row_ids-{first,second})
+    check(reviewer,path,'退回修改',{second})
     check(reviewer,path,'已批准',{first})
-    check(planner,'/versions/'+returned['version_id'],'未提交',row_ids)
+    check(planner,'/versions/'+returned['version_id'],'未提交',row_ids-{first})
     assert decision_label(None,'VOID')=='未复审'
     assert decision_label({'status':'BATCH_APPROVED'},'APPROVED')=='整批通过'
     assert decision_label({'status':'EXCEPTION_APPROVED'},'RETURNED')=='例外批准'
@@ -128,7 +131,7 @@ def test_warnings_allow_submission_and_finalization_without_individual_confirmat
     accepted=post(p,'/versions/'+vid+'/submit',body,'force-idempotent')
     assert accepted.status_code==200,accepted.text
     assert post(p,'/versions/'+vid+'/submit',body,'force-idempotent').json()==accepted.json()
-    frozen=r.get(P+'/versions/'+vid).json()
+    frozen=claim(r,'/versions/'+vid)
     bad=next(x for x in frozen['items'] if x['result']['data_status']=='ERROR')
     assert bad['input']['sea_plan_qty']=='?' and bad['result']['future_qty'] is None
     assert bad['submission_override']['mode']=='advisory' and bad['submission_override']['user_id']
@@ -164,7 +167,8 @@ def test_return_clears_acknowledgement_and_new_revision_rejects_stale(clients):
     assert post(p,'/versions/'+vid+'/submit',body).status_code==409
     report=p.get(P+'/versions/'+vid+'/confirmation').json();body.update(revision=report['revision'],issue_hash=report['issue_hash'])
     submitted=post(p,'/versions/'+vid+'/submit',body);assert submitted.status_code==200
-    returned=post(r,'/versions/'+vid+'/return',{'revision':submitted.json()['revision'],'reason':'重新核对'})
+    claimed=claim(r,'/versions/'+vid)
+    returned=post(r,'/versions/'+vid+'/return',{'revision':claimed['revision'],'ids':[v['items'][0]['id']],'reason':'重新核对'})
     assert returned.status_code==200
     new=p.get(P+'/versions/'+returned.json()['version_id']).json()
     assert all(not x.get('submission_override') for x in new['items'])
@@ -202,7 +206,8 @@ def test_exception_finalization_preserves_valid_decisions_and_covers_hidden_rows
     with SessionLocal.begin() as db:db.get(Version,vid).items=items
     v=p.get(P+'/versions/'+vid).json()
     submitted=post(p,'/versions/'+vid+'/submit',{'revision':v['revision']});assert submitted.status_code==200
-    reviewed=post(r,'/versions/'+vid+'/reviews',{'revision':submitted.json()['revision'],'ids':['0'],'decision':'APPROVED'})
+    claimed=claim(r,'/versions/'+vid)
+    reviewed=post(r,'/versions/'+vid+'/reviews',{'revision':claimed['revision'],'ids':['0'],'decision':'APPROVED'})
     assert reviewed.status_code==200 and reviewed.json()['count']==1
     report=r.get(P+'/versions/'+vid+'/confirmation?stage=finalize').json()
     assert report['total']==125 and report['affected_count']==124 and report['truncated'] and len(report['rows'])==100

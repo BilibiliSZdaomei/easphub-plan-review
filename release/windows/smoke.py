@@ -42,6 +42,17 @@ def smoke(archive, workdir):
     env['PATH'] = os.pathsep.join([str(shell.parent),str(system_root/'System32'),str(system_root)])
     env['PSMODULEPATH'] = str(shell.parent/'Modules')
     env['PLAN_REVIEW_DESKTOP_DATA'] = str(data)
+    versions = json.loads((app/'versions.json').read_text(encoding='utf-8'))
+    check_script = app/'scripts'/'verify-package.ps1'
+    template = app/'backend'/'templates'/'replenishment-plan.xlsx'
+    withheld = workdir/'withheld-for-integrity-test.xlsx'
+    template.rename(withheld)
+    try:
+        incomplete = subprocess.run([str(shell),'-NoProfile','-ExecutionPolicy','Bypass','-File',str(check_script)],
+                                    env=env,capture_output=True,timeout=45)
+        assert incomplete.returncode != 0 and b'replenishment-plan.xlsx' in incomplete.stderr
+    finally:
+        withheld.rename(template)
     with socket.socket() as probe:
         probe.bind(('127.0.0.1',0))
         port = probe.getsockname()[1]
@@ -76,7 +87,9 @@ def smoke(archive, workdir):
                     time.sleep(.25)
                 else:
                     raise TimeoutError('Desktop health endpoint did not become ready')
-                assert health['version'] == '2.0.0' and not health['demo'] and health['database']=='sqlite'
+                assert health['version'] == versions['version'] and not health['demo'] and health['database']=='sqlite'
+                ui_manifest = json.loads((app/'frontend'/'dist'/'app-build.json').read_text(encoding='utf-8'))
+                assert ui_manifest['version'] == versions['version']
                 page = fetch('').decode()
                 assets = re.findall(r'(?:src|href)="(/plan-review/[^"]+)"',page)
                 assert len(assets)>=2
@@ -95,8 +108,13 @@ def smoke(archive, workdir):
                 assert len(json.loads(fetch('api/v1/warehouses'))) == 10
                 assert json.loads(fetch('api/v1/snapshots')) == []
                 assert json.loads(fetch('api/v1/batches')) == []
-                with zipfile.ZipFile(BytesIO(fetch('api/v1/template?kind=v2'))) as xlsx:
-                    assert '填写说明' in xlsx.read('xl/workbook.xml').decode()
+                for kind, name in [('plan','replenishment-plan.xlsx'),('v2','plan-review-v2.xlsx')]:
+                    payload = fetch('api/v1/template?kind='+kind)
+                    assert payload == (app/'backend'/'templates'/name).read_bytes()
+                    with zipfile.ZipFile(BytesIO(payload)) as xlsx:
+                        assert xlsx.testzip() is None
+                        assert 'xl/workbook.xml' in xlsx.namelist()
+                assert '物料号' in fetch('api/v1/template?kind=standard').decode('utf-8-sig')
                 fetch('api/v1/sessions/current',headers={'X-CSRF-Token':session['csrf']},method='DELETE')
                 with sqlite3.connect((data/'plan-review.sqlite3').as_uri()+'?mode=ro',uri=True) as db:
                     assert db.execute('SELECT count(*) FROM users').fetchone()[0] == 1

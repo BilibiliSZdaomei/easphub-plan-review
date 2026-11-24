@@ -62,6 +62,9 @@ def export_workbook(payload):
     if v2:
         labels = {'pipeline_days':'净库存周转（天）', 'future_days':'补货后周转（天）'}
         columns = [(k, labels.get(k, title)) for k,title in COLS] + V2_COLUMNS
+    metadata = payload.get('metadata',{})
+    if metadata.get('复审负责人') or metadata.get('版本状态') in ('REJECTED','PARTIALLY_APPROVED') or any(row.get('return_reason') for row in payload['items']):
+        columns = [*columns, ('approved_sea','终审核准海运量'), ('approved_air','终审核准空运量'), ('return_reason','上轮退回原因')]
     ws.append([label for _,label in columns]);params.append(['参数','值','字段'])
     param_refs={}
     for key,value in package['params'].items():
@@ -78,12 +81,17 @@ def export_workbook(payload):
             'original_status':r['quantity_status'],'original_data':r['data_status'],'original_lower':r['lower'],'original_upper':r['upper'],'original_future':r['future_qty'],
             'submission_reason':o.get('reason'),'submission_user':o.get('user_name'),'submission_at':o.get('at'),'final_exception':d.get('reason') if d.get('forced') else None,
             'pipeline_days':None,'future_days':None,'is_key_model':'是' if i.get('is_key_model') is True else '否' if i.get('is_key_model') is False else None}
+        final = metadata.get('版本状态') in ('APPROVED','PARTIALLY_APPROVED','REJECTED')
+        if final and d.get('status') in ('REJECTED','APPROVED','EXCEPTION_APPROVED','BATCH_APPROVED'):
+            for qty,field in [('approved_sea','sea_plan_qty'),('approved_air','air_plan_qty')]:
+                values[qty] = 0 if d['status']=='REJECTED' else n(i.get(field))
+        values['return_reason'] = row.get('return_reason')
         for col,(key,_) in enumerate(columns,1):
             v=values.get(key)
             if key in ('reason_code','review_reason_code') and isinstance(v,str):v=REASON_LABELS.get(v,v)
             if key=='manual_flags':v='；'.join(FLAG_LABELS.get(f,f) for f in v or [])
             if key in ('quantity_status','review_mode','data_status','decision','original_status','original_data'):v=TEXT.get(v,v)
-            literal(ws.cell(idx,col),v,key in NUMERIC or key == 'vehicle_parc')
+            literal(ws.cell(idx,col),v,key in NUMERIC or key in ('vehicle_parc','approved_sea','approved_air'))
         if r.get('basis_pending'):
             literal(calc.cell(idx,1),i['material_code'])
             continue

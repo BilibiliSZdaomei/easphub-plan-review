@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'verify-package.ps1')
 . (Join-Path $PSScriptRoot 'runtime.ps1')
 $projectDir = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectDir 'runtime\python.exe'

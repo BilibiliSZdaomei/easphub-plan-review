@@ -25,10 +25,10 @@ def numeric(v):
 def decision_label(decision, version_state=None):
     status = (decision or {}).get('status')
     if status:
-        return {'APPROVED':'已批准','BATCH_APPROVED':'整批通过','EXCEPTION_APPROVED':'例外批准'}.get(status,status)
+        return {'APPROVED':'已批准','BATCH_APPROVED':'整批通过','EXCEPTION_APPROVED':'例外批准','REJECTED':'不批准','RETURNED':'退回修改'}.get(status,status)
     if version_state == 'DRAFT':
         return '未提交'
-    if version_state in ('RETURNED','VOID','APPROVED'):
+    if version_state in ('RETURNED','VOID','APPROVED','PARTIALLY_APPROVED','REJECTED'):
         return '未复审'
     return '待复审'
 
@@ -72,6 +72,8 @@ def query_items(items,q='',filter='all',column_filters=None,sort_key='',sort_dir
         if filter=='unexplained' and not submission_issues(i,r):continue
         if filter=='pending' and row.get('decision'):continue
         if filter=='returned' and not row.get('return_requested'):continue
+        if filter=='return_marked' and (row.get('decision') or {}).get('status')!='RETURNED':continue
+        if filter=='rejected' and (row.get('decision') or {}).get('status')!='REJECTED':continue
         if filter=='air' and 'AIR' not in r['manual_flags']:continue
         if filter=='modified' and not row.get('adjustment'):continue
         if filter.startswith('abc:') and i.get('material_abc')!=filter.split(':',1)[1]:continue

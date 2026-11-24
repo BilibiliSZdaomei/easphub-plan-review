@@ -70,7 +70,7 @@ if [ "$action" = install ]; then
             mv "$state_dir/secrets/initial-admin-password.new" "$state_dir/secrets/initial-admin-password"
         fi
         cat > "$config.new" <<ENV
-APP_IMAGE=easphub-plan-review-app:2.0.0
+APP_IMAGE=easphub-plan-review-app:2.1.0
 MYSQL_IMAGE=easphub-plan-review-mysql:8.4.8
 TZ=Europe/Budapest
 APP_DATA_HOST_PATH=$state_dir/app
@@ -87,6 +87,14 @@ ENV
     docker network inspect "$proxy_network" >/dev/null 2>&1 || docker network create "$proxy_network" >/dev/null
     compose config --quiet
     compose up -d --wait --wait-timeout 300 database
+    # A previous installation keeps its network, secrets and volume locations.
+    # Stop writers before schema migration, then switch to the images in this kit.
+    if ! grep -qx 'APP_IMAGE=easphub-plan-review-app:2.1.0' "$config"; then
+        compose stop web worker
+        grep -q '^APP_IMAGE=' "$config" || die '现有配置缺少 APP_IMAGE。'
+        sed 's|^APP_IMAGE=.*$|APP_IMAGE=easphub-plan-review-app:2.1.0|' "$config" > "$config.new"
+        mv "$config.new" "$config"
+    fi
     compose run --rm --no-deps -T migrate
     compose run --rm --no-deps -T migrate python -c '
 from pathlib import Path

@@ -2,7 +2,7 @@ from sqlalchemy import delete
 
 from backend.db import SessionLocal, Snapshot
 from backend.demo import DEMO_PASSWORD
-from test_api import P, clients, post
+from test_api import P, clients, post, claim
 from test_data import csvfile, upload
 
 
@@ -48,7 +48,7 @@ def test_new_warehouse_can_plan_and_complete_manual_review(clients):
     warnings = ok(planner.get(P+path+'/confirmation'))
     assert warnings['affected_count'] == 1 and warnings['rows'][0]['issues']
     ok(post(planner, path+'/submit', {'revision': draft['revision'], 'issue_hash': warnings['issue_hash']}))
-    submitted = ok(reviewer.get(P+path))
+    submitted = claim(reviewer,path)
     assert submitted['snapshot'] is None
     assert_pending(submitted['items'][0])
     assert submitted['items'][0]['submission_override']['issue_hash'] == warnings['issue_hash']

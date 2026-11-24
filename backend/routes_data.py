@@ -13,6 +13,7 @@ from .auth import role, scope
 from .api_common import context, once
 from .jobs import FILES
 from .adapters import FIELDS, MAX_BYTES, normalize
+from .template_assets import WORKBOOK_TEMPLATES
 from .rules import fingerprint, number
 from . import services as svc
 from .markets import MARKET_NAMES, market_key
@@ -124,7 +125,11 @@ def commit_import(job_id:str,data:dict,request:Request,ctx=Depends(context,scope
                 if plan.get('source_formulas'):inp['plan_source_formulas']=plan['source_formulas']
                 old=previous.get(inp['material_code'],{})
                 row={'id':old.get('id') or uid(),'input':inp,'result':svc.plan_result(inp,rule,ver.snapshot_id),'decision':None}
-                for key in ('return_requested','previous_decision'):
+                if old.get('decision'):
+                    from .comparison import changed_fields
+                    if not changed_fields(old['input'],inp,('plan_source','plan_source_formulas')) and not changed_fields(old['result'],row['result'],('input_hash',)):
+                        row['decision']=deepcopy(old['decision'])
+                for key in ('return_requested','return_reason','previous_decision'):
                     if old.get(key):row[key]=old[key]
                 rows.append(row)
             ver.items=rows;batch.updated_at=now();j.committed_id=ver.id;db.flush()
@@ -182,13 +187,9 @@ def commit_import(job_id:str,data:dict,request:Request,ctx=Depends(context,scope
 
 @router.get('/template')
 def template(kind:str='plan',ctx=Depends(context,scope="function")):
-    workbooks = {
-        'plan': ('replenishment-plan.xlsx', '补货计划模板.xlsx'),
-        'v2': ('plan-review-v2.xlsx', '计划审核V2模板.xlsx'),
-    }
-    if kind in workbooks:
-        asset, filename = workbooks[kind]
-        return FileResponse(Path(__file__).parent / 'templates' / asset, filename=filename,
+    if kind in WORKBOOK_TEMPLATES:
+        asset, filename = WORKBOOK_TEMPLATES[kind]
+        return FileResponse(asset, filename=filename,
                             media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     buf=StringIO();w=csv.writer(buf);w.writerow(FIELDS.values())
     return Response('\ufeff'+buf.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename="standard-data-template.csv"'})
@@ -215,5 +216,10 @@ def export(data:dict,request:Request,ctx=Depends(context,scope="function")):
         snap=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None
         rule=db.get(Rule,ver.rule_id)
         job=Job(id=uid(),kind='export',user_id=user.id,warehouse=batch.warehouse,payload={'batch_id':batch.id,'version_id':ver.id,'filtered':filtered,'items':deepcopy(rows),'rule_package':deepcopy(rule.package),'filename':f"计划审核_{market_tag}{batch.number}_V{ver.seq}_{'筛选结果' if filtered else '完整版本'}.xlsx",'metadata':{'市场':MARKET_NAMES.get(market,warehouse.market),'市场编码':warehouse.market,'仓库':warehouse.name,'仓库编码':warehouse.code,'批次':batch.number,'计划周期':batch.period,'计划周期说明':svc.batch_json(db,batch)['period_info']['label'],'筛选条件':json.dumps({'q':data.get('q',''),'filter':data.get('filter','all'),'columns':data.get('column_filters',{})},ensure_ascii=False) if filtered else '完整版本','排序':order,'版本':ver.seq,'版本状态':ver.state,'导出范围':'筛选结果' if filtered else '完整版本','规则版本':ver.rule_id,'审核标准名称':rule.name,'数据快照':ver.snapshot_id,'数据快照名称':snap.name if snap else '未关联','来源修订号':ver.revision,'导出人':user.name,'导出时间':now(),'精度版本':rule.package['precision_version'],'数据日期':snap.as_of if snap else None,'来源口径':snap.basis if snap else None,'规则参数':json.dumps(rule.package,ensure_ascii=False),'提交计算时间':ver.submitted_at or ver.created_at}})
+        if ver.reviewer_name:
+            job.payload['metadata']['复审负责人']=ver.reviewer_name
+        outcome={'APPROVED':'全部通过','REJECTED':'全部不批准','PARTIALLY_APPROVED':'部分通过'}.get(ver.state)
+        if outcome:
+            job.payload['metadata']['终审结果']=outcome
         db.add(job);audit(db,user,'创建导出',batch.warehouse,batch.id,ver.id,job_id=job.id,rows=len(rows),filtered=filtered);return {'id':job.id}
     return once(db,user,request,data,do)

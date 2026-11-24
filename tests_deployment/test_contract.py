@@ -71,11 +71,24 @@ def test_synthetic_upload_and_chinese_formula_export(fixture):
     app, _ = fixture
     with TestClient(app,base_url='https://testserver') as client:
         login(client)
-        uploaded = client.post(API+'/imports',data={'warehouse':'UK_MAIN','kind':'plan'},files={'file':('合成计划.csv','物料号,海运计划,空运计划\nDEMO-0001,35,0\n'.encode('utf-8'),'text/csv')})
+        for kind in ('plan','v2'):
+            response = client.get(API+'/template', params={'kind':kind})
+            assert response.status_code == 200
+            template = load_workbook(BytesIO(response.content), read_only=True)
+            assert len(next(template.active.values)) >= 3
+            template.close()
+        standard = client.get(API+'/template', params={'kind':'standard'})
+        assert standard.status_code == 200 and '物料号' in standard.content.decode('utf-8-sig')
+        source = '物料号,海运计划,空运计划\nDEMO-0001,35,0\n'.encode('utf-8')
+        uploaded = client.post(API+'/imports',data={'warehouse':'UK_MAIN','kind':'plan'},files={'file':('合成计划.csv',source,'text/csv')})
         assert uploaded.status_code == 200, uploaded.text
         run_job(uploaded.json()['id'])
         state = client.get(API+'/jobs/'+uploaded.json()['id']).json()
         assert state['state']=='DONE' and state['rows']==1
+        original = client.get(API+'/jobs/'+uploaded.json()['id']+'/download')
+        assert original.status_code == 200 and original.content == source
+        issues = client.get(API+'/imports/'+uploaded.json()['id']+'/errors')
+        assert issues.status_code == 200 and '物料号' in issues.content.decode('utf-8-sig')
         batch = client.get(API+'/batches').json()[0]
         version = client.get(API+'/versions/'+batch['current_id']).json()
         result = client.post(API+'/exports',json={'version_id':version['id']},headers={'Idempotency-Key':uuid.uuid4().hex})

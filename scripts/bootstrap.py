@@ -9,7 +9,7 @@ from backend.markets import EUROPE, EUROPE_RULE_NAME, LEGACY_DEFAULT, applies_to
 from argon2.exceptions import VerificationError
 
 def bootstrap(username,name,password,warehouses):
-    if not valid_password(password):raise ValueError('初始密码需为 12–200 位')
+    if not valid_password(password):raise ValueError('初始密码需为 6–200 位')
     if not username.strip() or not name.strip():raise ValueError('请填写账号与姓名')
     with transaction() as db:
         if db.query(User).first():raise ValueError('数据库已有账号，不能重复初始化，请使用人员管理页面')
@@ -62,7 +62,7 @@ if __name__=='__main__':
         if args.extend_markets:
             result=extend_markets(args.admin,getpass.getpass('现有管理账号密码（不回显）: '),config)
         else:
-            password=getpass.getpass('初始管理密码（至少12位，不回显）: ')
+            password=getpass.getpass('初始管理密码（6–200 位，不回显）: ')
             if password!=getpass.getpass('再输入一次: '):sys.exit('两次密码不一致')
             result=bootstrap(args.admin,args.name,password,config)
         print(json.dumps(result,ensure_ascii=False))

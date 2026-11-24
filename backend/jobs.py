@@ -90,7 +90,11 @@ def deliver_notifications():
         with SessionLocal.begin() as db:
             event=db.get(NotificationEvent,eid);p=event.payload
             for u in db.scalars(select(User).where(User.active.is_(True))):
-                if p['warehouse'] not in u.warehouses or not (('REVIEWER' in u.roles) if p['reviewers'] else u.id==p['owner']):continue
+                if p['warehouse'] not in u.warehouses:continue
+                if p.get('recipient') and u.id!=p['recipient']:continue
+                if p['reviewers']:
+                    if 'REVIEWER' not in u.roles or u.id==p['owner']:continue
+                elif u.id!=p['owner']:continue
                 nid=hashlib.sha256((eid+u.id).encode()).hexdigest()[:32]
                 if not db.get(Notification,nid):db.add(Notification(id=nid,user_id=u.id,batch_id=p['batch_id'],warehouse=p['warehouse'],text=p['text']))
             event.state='DONE';event.error=None

@@ -88,7 +88,7 @@ def inspect_accounts(db, admin, table):
         if not 1 <= len(name) <= 255 or not name.isprintable():
             issues.append('请填写有效姓名（最多 255 字）')
         if not valid_password(password):
-            issues.append('初始密码需为 12–200 位')
+            issues.append('初始密码需为 6–200 位')
         if not valid_roles:
             issues.append('请核对角色')
         if not valid_warehouses:

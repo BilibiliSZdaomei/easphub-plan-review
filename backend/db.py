@@ -14,7 +14,7 @@ from sqlalchemy.dialects import mysql
 STRING = String().with_variant(mysql.VARCHAR(255, charset='utf8mb4', collation='utf8mb4_0900_bin'), 'mysql')
 REAL = Float().with_variant(mysql.DOUBLE(), 'mysql')
 from .settings import data_directory, database_url
-SCHEMA_REVISION = '0004'
+SCHEMA_REVISION = '0005'
 
 ROOT=Path(__file__).resolve().parents[1]
 DATA=data_directory()
@@ -94,6 +94,8 @@ class Version(Base):
     id=Column(STRING,primary_key=True,default=uid); batch_id=Column(STRING,ForeignKey('batches.id'),nullable=False,index=True)
     seq=Column(Integer,nullable=False); revision=Column(Integer,nullable=False,default=1)
     state=Column(STRING,nullable=False,default='DRAFT'); snapshot_id=Column(STRING,ForeignKey('snapshots.id'),nullable=True)
+    reviewer_id=Column(STRING,nullable=True)
+    reviewer_name=Column(STRING,nullable=True)
     rule_id=Column(STRING,ForeignKey('rules.id'),nullable=False); items=Column(JSON,nullable=False)
     created_at=Column(STRING,default=now); submitted_at=Column(STRING); finalized_at=Column(STRING)
     __table_args__=(UniqueConstraint('batch_id','seq'),)

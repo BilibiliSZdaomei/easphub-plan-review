@@ -10,6 +10,21 @@ HEADER = '账号\t姓名\t初始密码\t角色\t授权仓库\n'
 SECRET = 'Test initial PW, 2026'
 
 
+def test_password_length_across_account_flows(clients):
+    _, _, admin, _ = clients
+    account = {"username":"length-test","name":"长度测试","roles":["PLANNER"],"warehouses":["UK_MAIN"]}
+    for password in ("abcde","x"*201," "*6):
+        assert post(admin,"/users",{**account,"password":password}).status_code == 422
+    assert post(admin,"/users",{**account,"password":"abc123"}).status_code == 200
+    preview = post(admin,"/users/bulk/preview",{"table":HEADER+"bulk-length\t长度测试\tabc123\t计划员\tUK_MAIN"})
+    assert preview.status_code == 200 and not preview.json()["rows"][0]["issues"]
+    with TestClient(app) as user:
+        login = user.post(P+"/sessions",json={"username":"length-test","password":"abc123"})
+        user.headers["X-CSRF-Token"] = login.json()["csrf"]
+        assert post(user,"/password",{"current_password":"abc123","password":"长"*200}).status_code == 200
+        assert user.post(P+"/sessions",json={"username":"length-test","password":"长"*200}).status_code == 200
+
+
 def test_bulk_preview_and_commit(clients):
     _, _, admin, _ = clients
     table = HEADER + f'a-plan\t计划人员\t{SECRET}\t计划员\t荷兰中心仓、DE_NSC\n' + \

@@ -12,7 +12,7 @@ from backend.demo import DEMO_PASSWORD, seed_demo
 from backend.jobs import run_job
 from backend.markets import EUROPE, EUROPE_RULE_NAME, MARKET_NAMES, register_markets, warehouse_config
 from scripts.bootstrap import bootstrap, extend_markets
-from test_api import P, clients, post
+from test_api import P, clients, post, claim
 
 
 def ok(response):
@@ -69,7 +69,7 @@ def test_v2_workflow_for_all_ten_markets(clients):
             edited=ok(planner.patch(P+path+'/items',json={'revision':version['revision'],'changes':[
                 {'id':row['id'],'values':{'air_reason':'合成测试急件'}}]}))
             ok(post(planner,path+'/submit',{'revision':edited['revision']}))
-            submitted=ok(reviewer.get(P+path))
+            submitted=claim(reviewer,path)
             review=ok(post(reviewer,path+'/reviews',{'revision':submitted['revision'],'ids':[row['id']],
                       'decision':'APPROVED','reason':'已核对急件及本仓补货时间','air_confirmed':True,
                       'ack_flags':[flag for flag in row['result']['manual_flags'] if flag!='AIR']}))

@@ -187,7 +187,7 @@ def create_user(data:dict,request:Request,ctx=Depends(context,scope="function"))
 
 def add_user(db,admin,data):
     password=data.get('password')
-    svc.demand(valid_password(password),'初始密码需为 12–200 位')
+    svc.demand(valid_password(password),'初始密码需为 6–200 位')
     account=User(id=uid(),username=data['username'],name=data['name'],roles=data['roles'],
                  warehouses=data['warehouses'],password_hash=hasher.hash(password))
     db.add(account)

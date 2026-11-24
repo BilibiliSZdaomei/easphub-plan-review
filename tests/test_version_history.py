@@ -1,5 +1,5 @@
 from backend.db import SessionLocal, User, audit
-from test_api import P, clients, current, post, ready
+from test_api import P, clients, current, post, ready, claim
 
 
 def test_copy_selected_version_and_read_only_its_activity(clients):
@@ -8,7 +8,7 @@ def test_copy_selected_version_and_read_only_its_activity(clients):
     original = old['items'][0]
     route = '/versions/' + old['id']
     assert post(planner, route+'/submit', {'revision':old['revision']}).status_code == 200
-    report = reviewer.get(P+route).json()
+    report = claim(reviewer,route)
     returned = post(reviewer, route+'/return', {'revision':report['revision'], 'reason':'补充本次订货量', 'ids':[original['id']]})
     assert returned.status_code == 200, returned.text
     new_id = returned.json()['version_id']

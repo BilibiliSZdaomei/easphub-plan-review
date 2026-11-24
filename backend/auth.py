@@ -35,10 +35,10 @@ def scope(user,warehouse):
     if warehouse not in user.warehouses: raise HTTPException(403,'没有该仓库的数据权限')
 
 def valid_password(value):
-    return isinstance(value,str) and 12<=len(value)<=200 and bool(value.strip())
+    return isinstance(value,str) and 6<=len(value)<=200 and bool(value.strip())
 
 def password_change(db,user,password):
     if not valid_password(password):
-        raise HTTPException(422,'新密码需为 12–200 位')
+        raise HTTPException(422,'新密码需为 6–200 位')
     user.password_hash=hasher.hash(password)
     db.execute(delete(LoginSession).where(LoginSession.user_id==user.id))

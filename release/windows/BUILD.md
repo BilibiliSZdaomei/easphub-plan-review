@@ -20,11 +20,11 @@ Pop-Location
 $name = 'cpython-3.12.16+20261123-x86_64-pc-windows-msvc-install_only_stripped.tar.gz'
 $uri = 'https://github.com/astral-sh/python-build-standalone/releases/download/20261123/' + $name
 Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile "$buildDir\$name"
-$zip = "$buildDir\PlanReview-v2.0.0-Windows-x64.zip"
+$zip = "$buildDir\PlanReview-v2.1.0-Windows-x64.zip"
 & $buildPython -B release/windows/build.py --source $projectDir --ui "$buildDir\frontend\dist" --python-archive "$buildDir\$name" --output $zip
 & $buildPython -B release/windows/smoke.py $zip "$buildDir\test-new"
 ```
 
-`build.py` 验证 CPython 发布资产 SHA-256、生产依赖版本和 wheel 文件哈希。包内的 `versions.json` 记录实际运行版本及来源。首次启动自动在当前 Windows 用户目录建立数据库和加密的初始管理员密码卡。
+`build.py` 验证 CPython 发布资产 SHA-256、生产依赖版本、前端构建版本和 wheel 文件哈希。包内的 `versions.json` 记录实际运行版本及来源。`Verify.cmd` 可独立检查程序文件；`Start.cmd` 启动前也会核对解压后的每个文件。首次启动自动在当前 Windows 用户目录建立数据库和加密的初始管理员密码卡。
 
 `smoke.py` 在新目录解压发布包，将 PATH 限制为系统目录，以 Windows PowerShell 5.1 连续启动两次。检查项包括数据库迁移、管理员登录、重启后密码、十个仓库、空计划库、V2 模板和网页资源。启动端口随机选取，用户工作区保持独立。

@@ -6,7 +6,8 @@ import BasisDialog from './BasisDialog'
 import VersionHistory from './VersionHistory'
 import CopyPlan from './CopyPlan'
 import ConfirmationDialog from './ConfirmationDialog'
-import {api,waitJob,BASE,fmt,date,flagLabels,reasonLabel,reasonLabels} from './api'
+import ReviewTransfer from './ReviewTransfer'
+import {api,waitJob,BASE,fmt,date,flagLabels,reasonLabel,reasonLabels,completedStates} from './api'
 import {Badge,Busy,Empty,Modal,Notice,Stepper,useDialog,useFormExit} from './ui'
 
 export default function PlanView({batchId,user,onBack,onUpdate,notify,onDirty,onOpenBatch,backLabel='返回计划列表'}:{backLabel?:string;onOpenBatch:(id:string)=>void;onDirty:(v:boolean)=>void;batchId:string;user:any;onBack:()=>void;onUpdate:()=>void;notify:(s:string)=>void}){
@@ -47,12 +48,15 @@ export default function PlanView({batchId,user,onBack,onUpdate,notify,onDirty,on
  }
  useEffect(()=>{load(undefined,false)},[batchId,versionId,q,filter,page,tableQuery])
  const editable=ver?.state==='DRAFT'&&ver?.owner===user.id&&batch?.current_id===ver?.id&&user.roles.includes('PLANNER')
- const reviewing=['SUBMITTED','IN_REVIEW'].includes(ver?.state)&&user.roles.includes('REVIEWER')&&ver?.owner!==user.id
+ const reviewStage=batch?.current_id===ver?.id&&['SUBMITTED','IN_REVIEW'].includes(ver?.state)
+ const eligible=reviewStage&&user.roles.includes('REVIEWER')&&ver.owner!==user.id
+ const canClaim=eligible&&!ver.reviewer_id
+ const reviewing=eligible&&ver.reviewer_id===user.id
  useEffect(()=>{if(filter==='pending'&&ver&&!['SUBMITTED','IN_REVIEW'].includes(ver.state)){setFilter('all');setPage(1)}},[ver?.state])
  const dirty=Object.keys(edits).length>0
  const unsaved=dirty||drawerDirty
  useEffect(()=>{onDirty(unsaved);const unload=(e:BeforeUnloadEvent)=>{if(unsaved){e.preventDefault();e.returnValue=''}};window.addEventListener('beforeunload',unload);return()=>{onDirty(false);window.removeEventListener('beforeunload',unload)}},[unsaved,onDirty])
- async function execute(fn:()=>Promise<any>,message?:string){if(lock.current)throw new Error('操作正在处理');lock.current=true;setBusy(true);setError('');setIssueRows([]);setIssueListOpen(false);try{const result=await fn();if(message)notify(message);await load(result?.version_id||ver.id);onUpdate();return result}catch(e:any){setError(e.message);setIssueRows(e.detail?.issues||[]);throw e}finally{lock.current=false;setBusy(false)}}
+ async function execute(fn:()=>Promise<any>,message?:string){if(lock.current)throw new Error('操作正在处理');lock.current=true;setBusy(true);setError('');setIssueRows([]);setIssueListOpen(false);try{const result=await fn();if(message)notify(message);await load(result?.version_id||ver.id);onUpdate();return result}catch(e:any){setError(e.message);setIssueRows(e.detail?.issues||[]);if(reviewStage&&[403,409].includes(e.status)){await load(ver.id);onUpdate()}throw e}finally{lock.current=false;setBusy(false)}}
  async function save(){await execute(()=>api(`/versions/${ver.id}/items`,{revision:ver.revision,changes:Object.entries(edits).map(([id,values])=>({id,values}))},'PATCH'),ver.snapshot?'修改已保存并重新计算':'修改已保存');setEdits({})}
  function setNumber(id:string,key:string,value:string){
   const original=ver.items.find((item:any)=>item.id===id)?.input[key]
@@ -85,6 +89,13 @@ export default function PlanView({batchId,user,onBack,onUpdate,notify,onDirty,on
  async function openIssue(id:string,ids:string[]){
   const item=await api('/versions/'+ver.id+'/items/'+id)
   setDialog('');setQueue(ids);setDrawerDirty(false);setDetail(item)
+ }
+ async function takeReview(){
+  try{await execute(()=>api('/versions/'+ver.id+'/claim',{revision:ver.revision}),'已领取复审')}catch{/* execute displays the error */}
+ }
+ async function transferReview(reviewerId:string){
+  await execute(()=>api('/versions/'+ver.id+'/transfer',{revision:ver.revision,reviewer_id:reviewerId}),'复审已转交')
+  setSelected(new Set());setDialog('')
  }
  async function openReviewSelection(){
   setBusy(true);setError('')
@@ -119,17 +130,17 @@ export default function PlanView({batchId,user,onBack,onUpdate,notify,onDirty,on
     else if(dialog==='delete'){path=`/versions/${ver.id}/items`;body.ids=[...selected];method='DELETE'}
     else if(dialog==='void')path=`/batches/${batch.id}/void`
     else if(dialog==='review'){path=`/versions/${ver.id}/reviews`;body.ids=[...selected];body.only_pending=true}
-    else {path=`/versions/${ver.id}/${dialog}`;if(dialog==='return')body.ids=[...selected]}
+    else path=`/versions/${ver.id}/${dialog}`
     const r=await execute(()=>api(path,body,method));setDialog('');setSelected(new Set())
     if(dialog==='review'){
-     const result=[`本次批准 ${r.count} 行`]
+     const result=[`已保存 ${r.count} 行复审决定`]
      if(r.preserved)result.push(`已有决定 ${r.preserved} 行`)
      if(r.skipped?.length){
       result.push(`需单独处理 ${r.skipped.length} 行`)
       setIssueRows(r.skipped.map((item:any)=>({...item,message:item.reason})))
      }
      notify(result.join(' · '))
-    }else notify(({submit:'已提交复审',finalize:'整批计划已通过',return:'已退回并生成新草稿',reason:'说明已保存',delete:'已移除所选计划行',void:'计划已作废'} as any)[dialog]||'复审决定已保存')
+    }else notify(({submit:'已提交复审',finalize:'已完成终审',return:'已退回并生成新草稿',reason:'说明已保存',delete:'已移除所选计划行',void:'计划已作废'} as any)[dialog]||'复审决定已保存')
 
  }
  if(!ver||!batch)return error?<><Notice message={error} tone="error"/><button className="secondary" onClick={()=>{setError('');load()}}>重新读取</button></>:<Busy/>
@@ -137,27 +148,34 @@ export default function PlanView({batchId,user,onBack,onUpdate,notify,onDirty,on
  const showReturned=editable&&batch.state==='RETURNED'&&counts.return_requested>0
  return <div className="plan-view">
   <button className="back-link" disabled={busy} onClick={()=>proceed(onBack)}><ArrowLeft size={15}/>{backLabel}</button>
-  <div className="page-heading plan-heading"><div><div className="heading-inline"><h1>{batch.title}</h1><Badge value={ver.state}/></div><p>{batch.warehouse_name}<span className="separator">/</span>{batch.number}<span className="separator">/</span>第 {ver.seq} 版<span className="separator">/</span>{batch.owner_name}<span className="separator">/</span>{batch.period_info?.label||batch.period}</p></div><div className="actions"><button className="secondary" onClick={()=>setHistory(!history)} disabled={busy}><History size={16}/>版本记录</button><button className="secondary" onClick={()=>proceed(()=>doExport('all'))} disabled={exporting||busy}>{exporting?<RefreshCw size={16} className="spin"/>:<Download size={16}/>}导出</button>{editable&&<button className="primary" disabled={busy||!counts.total} onClick={()=>proceed(()=>setDialog('submit'))}><Send size={16}/>提交复审</button>}{reviewing&&<><button className="secondary" disabled={busy} onClick={()=>setDialog('return')}><RotateCcw size={16}/>退回</button><button className="primary" disabled={busy||!counts.total} onClick={()=>setDialog('finalize')}><CheckCheck size={17}/>完成终审</button></>}</div></div>
-  {ver.id===batch.current_id&&batch.state!=='VOID'&&<Stepper current={ver.state==='APPROVED'?4:ver.state==='DRAFT'?(counts.total?2:1):3}/>}
-  {batch.state==='RETURNED'&&editable&&<Notice message={'复审退回意见：'+(batch.events.find((e:any)=>e.action==='退回修改')?.detail.reason||'请核对计划后重新提交。')}/>} 
+  <div className="page-heading plan-heading"><div><div className="heading-inline"><h1>{batch.title}</h1><Badge value={ver.state} label={reviewStage&&!ver.reviewer_id?'待领取':undefined}/></div><p>{batch.warehouse_name}<span className="separator">/</span>{batch.number}<span className="separator">/</span>第 {ver.seq} 版<span className="separator">/</span>{batch.owner_name}<span className="separator">/</span>{batch.period_info?.label||batch.period}{ver.reviewer_name&&<><span className="separator">/</span>复审人 · {ver.reviewer_name}</>}</p></div><div className="actions"><button className="secondary" onClick={()=>setHistory(!history)} disabled={busy}><History size={16}/>版本记录</button><button className="secondary" onClick={()=>proceed(()=>doExport('all'))} disabled={exporting||busy}>{exporting?<RefreshCw size={16} className="spin"/>:<Download size={16}/>}导出</button>{editable&&<button className="primary" disabled={busy||!counts.total} onClick={()=>proceed(()=>setDialog('submit'))}><Send size={16}/>提交复审</button>}{canClaim&&<button className="primary" disabled={busy} onClick={takeReview}><Check size={16}/>领取复审</button>}
+   {reviewing&&<><button className="secondary" disabled={busy} onClick={()=>setDialog('transfer')}>转交复审</button>
+    {counts.return_marked>0
+     ?<button className="primary" disabled={busy} onClick={()=>setDialog('return')}><RotateCcw size={16}/>退回计划（{counts.return_marked} 行）</button>
+     :<button className="primary" disabled={busy||!counts.total} onClick={()=>setDialog('finalize')}><CheckCheck size={17}/>完成终审</button>}
+   </>}</div></div>
+  {ver.id===batch.current_id&&batch.state!=='VOID'&&<Stepper current={completedStates.includes(ver.state)?4:ver.state==='DRAFT'?(counts.total?2:1):3}/>}
+  {showReturned&&<Notice message={`${counts.return_requested} 行需修改，请查看各行退回原因。`}/>}
+  {editable&&batch.state==='RETURNED'&&batch.events?.find((e:any)=>e.action==='退回修改')?.detail.reason&&<Notice message={batch.events.find((e:any)=>e.action==='退回修改').detail.reason}/>}
   {error&&<Notice message={error} tone="error"/>}
   {issueRows.length>0&&<div className="issue-list">{(issueListOpen?issueRows:issueRows.slice(0,6)).map((e,i)=><button key={i} disabled={busy} onClick={()=>proceed(()=>{if(e.id){setBusy(true);openIssue(e.id,issueRows.map(row=>row.id).filter(Boolean)).catch(err=>setError(err.message)).finally(()=>setBusy(false))}else{setQ(e.material_code||'');setFilter('all');changeTable(EMPTY_TABLE)}})}><span>{e.material_code}</span>{e.message}</button>)}{issueRows.length>6&&<button className="text-button" onClick={()=>setIssueListOpen(!issueListOpen)}>{issueListOpen?'收起':`查看全部 ${issueRows.length} 项`}</button>}</div>}
   {ver.id!==batch.current_id&&<div className="historical-context"><span>正在查看历史版本 · 第 {ver.seq} 版</span><button className="text-button" onClick={()=>selectVersion(batch.current_id)}>返回最新版</button></div>}
   {history&&<VersionHistory key={ver.id} versions={batch.versions} selected={ver} revision={ver.revision} current={batch.current_id} busy={busy} onSelect={selectVersion} onClose={()=>setHistory(false)}/>}
   <div className="basis-line"><span><span className="live-dot"/> {ver.rule.name}</span><span><DatabaseIcon/> {ver.snapshot?<>{ver.snapshot.name}<small>数据日期 {ver.snapshot.as_of}</small></>:'未关联快照 · 人工复审'}</span>{editable&&<button className="text-button" disabled={busy} onClick={()=>proceed(()=>setDialog('basis'))}>{ver.snapshot?'更换依据':'关联数据快照'}<SlidersHorizontal size={13}/></button>}<span className="spacer"/>{reviewing?<span className="review-progress">已复审 <b>{counts.reviewed}</b> / {counts.total} 行</span>:<span>{ver.id===batch.current_id?'已保存 '+date(batch.updated_at):'历史版本 · 只读'}</span>}</div>
   <section className={`panel plan-table-panel density-${density}`}><div className="plan-table-header"><div><h2>{reviewing?'核对与复审':'计划明细'}</h2><span>{counts.total} 行物料</span></div><div className="actions">{editable&&<><button className="text-button" disabled={busy} onClick={()=>proceed(()=>setDialog('add'))}><Plus size={15}/>添加物料</button><button className="secondary compact" disabled={busy} onClick={()=>proceed(()=>setDialog('import'))}><Upload size={15}/>导入计划</button></>}</div></div>
-   <div className="filter-tabs">{[['all','全部',counts.total],...(showReturned?[['returned','指定修改',counts.return_requested]]:[]),['attention','需关注',counts.attention],...(ver.rule?.model==='V2'?[['delay','建议延迟',counts.delay||0]]:[]),['WITHIN','合理',counts.WITHIN],['BELOW','偏少',counts.BELOW],['ABOVE','偏多',counts.ABOVE],['MANUAL','人工判断',counts.MANUAL],['EXEMPT','免数量审核',counts.EXEMPT],[reviewing?'pending':'unexplained',reviewing?'未复审':'资料待补',reviewing?counts.total-counts.reviewed:counts.unexplained]].map(([key,name,count])=><button disabled={busy} key={String(key)} aria-pressed={filter===key} className={filter===key?'active':''} onClick={()=>proceed(()=>{setFilter(String(key));setPage(1);setSelected(new Set())})}>{name}<span>{count}</span></button>)}</div>
+   <div className="filter-tabs">{[['all','全部',counts.total],...(showReturned?[['returned','需修改',counts.return_requested]]:[]),...(counts.return_marked>0?[['return_marked','退回修改',counts.return_marked]]:[]),...(counts.rejected>0?[['rejected','不批准',counts.rejected]]:[]),['attention','需关注',counts.attention],...(ver.rule?.model==='V2'?[['delay','建议延迟',counts.delay||0]]:[]),['WITHIN','合理',counts.WITHIN],['BELOW','偏少',counts.BELOW],['ABOVE','偏多',counts.ABOVE],['MANUAL','人工判断',counts.MANUAL],['EXEMPT','免数量审核',counts.EXEMPT],[reviewStage?'pending':'unexplained',reviewStage?'未复审':'资料待补',reviewStage?counts.total-counts.reviewed:counts.unexplained]].map(([key,name,count])=><button disabled={busy} key={String(key)} aria-pressed={filter===key} className={filter===key?'active':''} onClick={()=>proceed(()=>{setFilter(String(key));setPage(1);setSelected(new Set())})}>{name}<span>{count}</span></button>)}</div>
    <div className="list-toolbar"><label className="search"><Search size={16}/><input aria-label="搜索物料号或名称" value={q} disabled={busy} onChange={e=>{const value=e.target.value;proceed(()=>{setQ(value);setPage(1);setSelected(new Set())})}} placeholder="搜索物料号或名称"/></label><select aria-label="更多物料筛选" disabled={busy} value={['ERROR','air','modified','abc:A','abc:B','abc:C'].includes(filter)?filter:''} onChange={e=>{const value=e.target.value;proceed(()=>{setFilter(value||'all');setPage(1);setSelected(new Set())})}}><option value="">更多筛选</option><option value="ERROR">数据错误</option><option value="air">包含空运</option><option value="modified">已修改</option><option value="abc:A">物料分类 A</option><option value="abc:B">物料分类 B</option><option value="abc:C">物料分类 C</option></select><TableViewControls columns={visibleCols} onChange={setVisibleCols} density={density} onDensityChange={setDensity} disabled={busy} availableColumns={ver.columns.map((c:any)=>c.key)}/><ColumnPicker disabled={busy} columns={ver.columns||[]} visible={visibleCols} onChange={setVisibleCols}/><span className="spacer"/><button className="text-button" disabled={busy||exporting} onClick={()=>proceed(()=>doExport('filtered'))}><Download size={14}/>导出筛选</button></div>
-   {selected.size>0&&<div className="selection-bar"><strong>已选 {selected.size} 行</strong><button className="text-button" onClick={async()=>{const r=await api(`/versions/${ver.id}/selection?q=${encodeURIComponent(q)}&filter=${filter}${tableQuery}`);setSelected(new Set(r.ids))}}>选择全部筛选结果 ({ver.total})</button><span className="spacer"/>{editable&&<><button disabled={busy} onClick={()=>proceed(()=>setDialog('reason'))}>批量填写说明</button><button disabled={busy} onClick={()=>proceed(()=>setDialog('delete'))}>移除</button></>}{reviewing&&<><button disabled={busy} onClick={openReviewSelection}>复审所选</button></>}<button aria-label="取消选择" onClick={()=>setSelected(new Set())}><X size={15}/></button></div>}
-   <ReviewTable ver={ver} visible={visibleCols} state={tableState} onState={next=>proceed(()=>changeTable(next))} editable={editable} dirty={false} busy={busy} selected={selected} setSelected={setSelected} edits={edits} setNumber={setNumber} onDetail={row=>proceed(()=>openDetail(row))}/>
+   {(editable||reviewing)&&selected.size>0&&<div className="selection-bar"><strong>已选 {selected.size} 行</strong><button className="text-button" onClick={async()=>{const r=await api(`/versions/${ver.id}/selection?q=${encodeURIComponent(q)}&filter=${filter}${tableQuery}`);setSelected(new Set(r.ids))}}>选择全部筛选结果 ({ver.total})</button><span className="spacer"/>{editable&&<><button disabled={busy} onClick={()=>proceed(()=>setDialog('reason'))}>批量填写说明</button><button disabled={busy} onClick={()=>proceed(()=>setDialog('delete'))}>移除</button></>}{reviewing&&<><button disabled={busy} onClick={openReviewSelection}>复审所选</button></>}<button aria-label="取消选择" onClick={()=>setSelected(new Set())}><X size={15}/></button></div>}
+   <ReviewTable ver={ver} visible={visibleCols} state={tableState} onState={next=>proceed(()=>changeTable(next))} editable={editable} reviewing={reviewing} dirty={false} busy={busy} selected={selected} setSelected={setSelected} edits={edits} setNumber={setNumber} onDetail={row=>proceed(()=>openDetail(row))}/>
    {editable&&!counts.total&&<div className="empty-plan-import"><button className="primary" onClick={()=>setDialog('import')}><Upload size={16}/>导入计划</button></div>}
    <div className="table-footer"><span>显示 {ver.total?((page-1)*ver.page_size+1):0}–{Math.min(page*ver.page_size,ver.total)} / {ver.total} 行</span><span className="spacer"/><button className="icon-button" aria-label="上一页" disabled={busy||page<=1} onClick={()=>proceed(()=>setPage(page-1))}><ChevronLeft size={17}/></button><span>{page} / {Math.max(1,Math.ceil(ver.total/ver.page_size))}</span><button className="icon-button" aria-label="下一页" disabled={busy||page*ver.page_size>=ver.total} onClick={()=>proceed(()=>setPage(page+1))}><ChevronRight size={17}/></button></div>
   </section>
   <div className="plan-bottom-note"><span className="spacer"/>{user.roles.includes('PLANNER')&&<button className="text-button" disabled={busy} onClick={()=>proceed(()=>setDialog('copy'))}><Copy size={14}/>复制为新计划</button>}{editable&&<button className="text-button" disabled={busy} onClick={()=>proceed(()=>setDialog('void'))}>作废计划</button>}</div>
   {dirty&&<div className="save-bar"><span><span className="unsaved-dot"/>{Object.keys(edits).length} 行修改尚未保存</span><span className="spacer"/><button className="secondary" disabled={busy} onClick={()=>setEdits({})}>撤销本次修改</button><button className="primary" disabled={busy} onClick={()=>save().catch(()=>{})}><Save size={16}/>{busy?'正在保存…':ver.snapshot?'保存并重算':'保存修改'}</button></div>}
   {pending&&<Modal title={`保存这 ${Object.keys(edits).length} 行修改？`} onClose={()=>{if(!busy)setPending(null)}}><div className="modal-body">{error&&<Notice message={error} tone="error"/>}<div className="modal-actions"><button className="text-button" disabled={busy} onClick={()=>setPending(null)}>继续编辑</button><button className="secondary" disabled={busy} onClick={()=>resume(false)}>放弃并继续</button><button className="primary" disabled={busy} onClick={()=>resume(true)}>{busy?'正在保存…':'保存并继续'}</button></div></div></Modal>}
-  {detail&&<ItemDrawer onReturn={()=>{setSelected(new Set([detail.id]));closeDetail();setDialog('return')}} key={detail.id} row={detail} ver={ver} editable={editable} reviewing={reviewing} position={position} total={queue.length} onMove={advance} onDirty={setDrawerDirty} onClose={closeDetail} onSave={(v,next)=>finishItem(v,next,false)} onReview={(v,next)=>finishItem(v,next,true)}/>}
-  {['return','review','reason','delete','void'].includes(dialog)&&<ActionDialog kind={dialog} reviewMeta={reviewMeta} count={selected.size} onClose={()=>setDialog('')} onConfirm={confirmAction}/>} 
+  {detail&&<ItemDrawer key={detail.id} row={detail} ver={ver} editable={editable} reviewing={reviewing} position={position} total={queue.length} onMove={advance} onDirty={setDrawerDirty} onClose={closeDetail} onSave={(v,next)=>finishItem(v,next,false)} onReview={(v,next)=>finishItem(v,next,true)}/>}
+  {['return','review','reason','delete','void'].includes(dialog)&&<ActionDialog kind={dialog} reviewMeta={reviewMeta} count={dialog==='return'?counts.return_marked:selected.size} onClose={()=>setDialog('')} onConfirm={confirmAction}/>}
+  {dialog==='transfer'&&reviewing&&<ReviewTransfer versionId={ver.id} onClose={()=>setDialog('')} onTransfer={transferReview}/>}
   {['submit','finalize'].includes(dialog)&&<ConfirmationDialog kind={dialog} ver={ver} onItem={openIssue} onClose={()=>setDialog('')} onConfirm={confirmAction}/>}
   {dialog==='add'&&<AddMaterial ver={ver} onClose={()=>setDialog('')} onAdd={async item=>{await execute(()=>api(`/versions/${ver.id}/items`,{revision:ver.revision,items:[item]}),'物料已添加');setDialog('')}}/>}
   {dialog==='import'&&<ImportPlan warehouse={batch.warehouse} ver={ver} onClose={()=>setDialog('')} onDone={async()=>{setDialog('');await load();onUpdate();notify('计划已导入，请开始自审')}}/>}
@@ -179,9 +197,9 @@ function adjustmentValue(key:string, value:unknown){
  return key==='reason_code'?reasonLabel(text):text
 }
 
-function ItemDrawer({row,ver,editable,reviewing,position,total,onMove,onDirty,onClose,onSave,onReview,onReturn}:{
+function ItemDrawer({row,ver,editable,reviewing,position,total,onMove,onDirty,onClose,onSave,onReview}:{
  row:any;ver:any;editable:boolean;reviewing:boolean;position:number;total:number
- onReturn:()=>void;onMove:(index:number)=>Promise<void>;onDirty:(v:boolean)=>void;onClose:()=>void
+ onMove:(index:number)=>Promise<void>;onDirty:(v:boolean)=>void;onClose:()=>void
  onSave:(v:any,next:boolean)=>Promise<void>;onReview:(v:any,next:boolean)=>Promise<void>
 }){
  const i=row.input,r=row.result
@@ -213,9 +231,10 @@ function ItemDrawer({row,ver,editable,reviewing,position,total,onMove,onDirty,on
    {r.review_mode==='AUTO'&&r.quantity_status!=='UNAVAILABLE'&&<div className={'advice-box '+((r.quantity_status!=='WITHIN'||r.sea_feasible===false)?'exception':'')}><strong>{r.quantity_status==='WITHIN'?'计划数量在合理区间内':r.sea_feasible===false?'已有供给需要进一步核对':r.quantity_status==='BELOW'?'建议适当增加海运计划':'建议适当减少海运计划'}</strong><p>{r.sea_feasible===false?`本次海运即使减到 0，仍有 ${fmt(r.residual_excess)} 件超出库存上限。`:r.sea_feasible?`保持空运不变时，海运可行范围为 ${fmt(r.sea_lower)}–${fmt(r.sea_upper)} 件，建议本次海运 ${fmt(r.suggested_sea_qty)} 件。`:r.explanation}</p>{editable&&r.sea_feasible&&r.quantity_status!=='WITHIN'&&<button type="button" className="text-button" onClick={()=>setValues({...values,sea_plan_qty:r.suggested_sea_qty})}>填入建议海运量 <ArrowRight size={13}/></button>}</div>}
    {ver.snapshot&&r.review_mode!=='AUTO'&&<p className="explanation">{r.review_mode==='EXEMPT'?'本物料免数量审核。':'按实际市场需求判断，可补充需求依据。'}</p>}
    {editable?<form onSubmit={save}><div className="form-grid"><label>本次海运<input type="number" min="0" step={i.quantity_step||1} value={values.sea_plan_qty} onChange={e=>setValues({...values,sea_plan_qty:e.target.value})}/></label><label>本次空运<input type="number" min="0" step={i.quantity_step||1} value={values.air_plan_qty} onChange={e=>setValues({...values,air_plan_qty:e.target.value})}/></label></div><label>原因类别<select value={values.reason_code} onChange={e=>setValues({...values,reason_code:e.target.value})}><option value="">选填</option><ReasonOptions current={values.reason_code}/></select></label><label>计划说明<textarea aria-label="计划说明" rows={4} value={values.reason} onChange={e=>setValues({...values,reason:e.target.value})} maxLength={2000}/></label>{Number(values.air_plan_qty)>0&&<label>空运必要性<textarea rows={3} value={values.air_reason} onChange={e=>setValues({...values,air_reason:e.target.value})} placeholder="选填"/></label>}<div className="modal-actions"><button className={position+1<total?'secondary':'primary'} disabled={busy}><Save size={16}/>保存并关闭</button>{position+1<total&&<button className="primary" value="next" disabled={busy}>保存并下一条<ChevronRight size={16}/></button>}</div></form>:<div className="read-reasons"><h3>计划员说明</h3>{i.reason_code&&<p>{reasonLabel(i.reason_code)}</p>}<p>{i.reason||'未填写例外说明'}</p>{i.air_reason&&<><h3>空运必要性</h3><p>{i.air_reason}</p></>}</div>}
+   {editable&&row.return_requested&&row.return_reason&&<Notice message={'本行退回原因 · '+row.return_reason}/>}
    {editable&&row.previous_decision&&<details className="adjustment"><summary>上版复审意见</summary><Badge value={row.previous_decision.status}/>{row.previous_decision.reason_code&&<p>{reasonLabel(row.previous_decision.reason_code)}</p>}{row.previous_decision.reason&&<p>{row.previous_decision.reason}</p>}<small>{row.previous_decision.reviewer_name} · {date(row.previous_decision.reviewed_at)}</small></details>}
-   {row.decision&&<div className="decision-box"><Badge value={row.decision.status}/>{row.decision.reason_code&&<p>{reasonLabel(row.decision.reason_code)}</p>}{row.decision.reason&&<p>{row.decision.reason}</p>}<small>{row.decision.reviewer_name} · {date(row.decision.reviewed_at)}</small></div>}
-   {reviewing&&r.data_status==='ERROR'&&<button className="secondary" disabled={busy} onClick={()=>{if(mayLeave())onReturn()}}><RotateCcw size={15}/>退回整批并标记此行</button>}
+   {row.decision&&<div className={'decision-box '+row.decision.status.toLowerCase()}><Badge value={row.decision.status}/>{row.decision.reason_code&&<p>{reasonLabel(row.decision.reason_code)}</p>}{row.decision.reason&&<p>{row.decision.reason}</p>}<small>{row.decision.reviewer_name} · {date(row.decision.reviewed_at)}</small></div>}
+
    {reviewing&&<ReviewForm previous={row.decision} flags={r.manual_flags} exception={['BELOW','ABOVE'].includes(r.quantity_status)} hasNext={position+1<total} onDirty={setReviewDirty} onConfirm={(v,next)=>run(()=>onReview(v,next))}/>}
   </div>{tab==='evidence'&&!ver.snapshot&&<p className="muted">本版未关联仓库数据，暂无自动审核结果。</p>}
   {tab==='evidence'&&ver.snapshot&&<><h3>本行计算过程</h3><div className="formula-chain"><div><span>01</span><section><strong>审核前净额</strong><b>{fmt(i.net_supply_before_plan)}</b><p>{ver.snapshot.basis}</p></section></div><div><span>02</span><section><strong>本次下单后的未来库存</strong><p className="formula">{fmt(i.net_supply_before_plan)} + {fmt(i.sea_plan_qty)} + {fmt(i.air_plan_qty)} = <b>{fmt(r.future_qty)}</b></p><small>审核前净额 + 海运 + 空运</small></section></div><div><span>03</span><section><strong>{r.rule_id||'人工判断'}</strong><p>{r.explanation}</p><dl><dt>更换率目标 X</dt><dd>{fmt(i.replacement_target)}</dd><dt>销量目标 Y</dt><dd>{fmt(i.sales_target)}</dd><dt>月均销量较大值 m</dt><dd>{fmt(r.m)}</dd><dt>装车量</dt><dd>{fmt(i.fleet_qty)}</dd>{'advice' in r&&<><dt>备件保有量</dt><dd>{fmt(i.vehicle_parc)}</dd><dt>车型</dt><dd>{i.vehicle_model||'—'}</dd><dt>在库周转（月）</dt><dd>{r.m==='0'?'无销量':fmt(r.on_hand_months)}</dd><dt>补货后周转（天）</dt><dd>{r.m==='0'?'无销量':fmt(r.future_days)}</dd><dt>审批建议</dt><dd>{r.advice}</dd>{i.source_note&&<><dt>备注</dt><dd>{i.source_note}</dd></>}</>}<dt>稳态更换率</dt><dd>{i.replacement_rate==null?'未提供':fmt(Number(i.replacement_rate)*100)+'%'}</dd><dt>重点车型</dt><dd>{i.is_key_model===true?'是':i.is_key_model===false?'否':'未提供'}</dd><dt>原始区间</dt><dd>{fmt(r.lower_raw)} — {fmt(r.upper_raw)}</dd><dt>取整后区间</dt><dd>{fmt(r.lower)} — {fmt(r.upper)}</dd></dl></section></div></div><details className="evidence-details"><summary>命中关键词与分类</summary>{Object.entries(r.matched_keywords).map(([group,words]:[string,any])=>words.length>0&&<p key={group}>{({small:'小件',maintenance:'保养件',dangerous:'危包',manual:'用品精品',no_stock:'不备货'} as any)[group]}：{words.join('、')}</p>)}{r.override&&<p>按当前规则版本覆盖为：{r.override}</p>}</details><details className="evidence-details"><summary>数据来源与审核参数</summary><p>{i.source?.file} / {i.source?.sheet} / 第 {i.source?.row} 行</p><p>快照：{ver.snapshot.name}</p><p>规则：{ver.rule.name}</p>{i.plan_source&&<p>计划来源：{i.plan_source.file} / {i.plan_source.sheet} / 第 {i.plan_source.row} 行</p>}<p>目标库存沿用所选数据快照中的提供值。</p><small>{r.precision_version}</small><dl>{Object.entries(ver.rule.params).map(([key,val])=><div className="parameter-evidence" key={key}><dt>{key}</dt><dd>{fmt(val)}</dd></div>)}</dl></details></>}
@@ -223,30 +242,37 @@ function ItemDrawer({row,ver,editable,reviewing,position,total,onMove,onDirty,on
 }
 
 function ReviewForm({flags,exception,onConfirm,onDirty,hasNext=false,previous}:{previous?:any;flags:string[];exception:boolean;onDirty?:(v:boolean)=>void;hasNext?:boolean;onConfirm:(v:any,next:boolean)=>Promise<void>}){
- const initialDecision=previous?.status||'APPROVED'
+ const initialDecision=previous?.status==='BATCH_APPROVED'?'APPROVED':previous?.status||'APPROVED'
  const [decision,setDecision]=useState(initialDecision),[reasonCode,setReasonCode]=useState(previous?.reason_code||''),[reason,setReason]=useState(previous?.reason||'')
  const [acks,setAcks]=useState<string[]>(previous?.ack_flags||[]),[air,setAir]=useState(!!previous?.air_confirmed),[busy,setBusy]=useState(false),[error,setError]=useState('')
  const dirty=decision!==initialDecision||reasonCode!==(previous?.reason_code||'')||reason!==(previous?.reason||'')||
   air!==!!previous?.air_confirmed||acks.length!==(previous?.ack_flags?.length||0)||acks.some(f=>!previous?.ack_flags?.includes(f))
  useEffect(()=>{onDirty?.(dirty);return()=>onDirty?.(false)},[dirty,onDirty])
+ const needsReason=decision==='RETURNED'||decision==='REJECTED'
  async function confirm(e:FormEvent){
   e.preventDefault();if(busy)return
+  if(needsReason&&!reason.trim()){setError(decision==='RETURNED'?'请填写退回原因':'请填写不批准原因');return}
   const next=((e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement)?.value==='next'
   setBusy(true);setError('')
-  try{await onConfirm({decision,reason,reason_code:reasonCode,ack_flags:acks,air_confirmed:air},next)}
+  try{await onConfirm({decision,reason:reason.trim(),reason_code:decision==='EXCEPTION_APPROVED'?reasonCode:'',ack_flags:needsReason?[]:acks,air_confirmed:!needsReason&&air},next)}
   catch(e:any){setError(e.message)}finally{setBusy(false)}
  }
  return <form className="review-form" onSubmit={confirm}>
   {error&&<Notice message={error} tone="error"/>}
   {(exception||flags.length>0)&&<p className="muted">{[...(exception?['数量超出范围']:[]),...flags.map(f=>flagLabels[f]||f)].join(' · ')}</p>}
-  <details open={previous?true:undefined}><summary>补充复审记录（选填）</summary>
-   <label>处理方式<select value={decision} onChange={e=>setDecision(e.target.value)}><option value="APPROVED">批准</option><option value="EXCEPTION_APPROVED">例外批准</option></select></label>
-   {decision==='EXCEPTION_APPROVED'&&<label>原因类别<select value={reasonCode} onChange={e=>setReasonCode(e.target.value)}><option value="">选填</option><ReasonOptions current={reasonCode}/></select></label>}
-   {flags.filter(f=>f!=='AIR').map(f=><label key={f} className="check-row"><input type="checkbox" checked={acks.includes(f)} onChange={e=>setAcks(e.target.checked?[...acks,f]:acks.filter(x=>x!==f))}/><span>已核对 {flagLabels[f]}</span></label>)}
-   {flags.includes('AIR')&&<label className="check-row"><input type="checkbox" checked={air} onChange={e=>setAir(e.target.checked)}/><span>已单独确认空运必要性</span></label>}
-   <label>复审备注<textarea aria-label="复审备注" maxLength={2000} rows={2} value={reason} onChange={e=>setReason(e.target.value)}/></label>
-  </details>
-  <div className="modal-actions"><button className={hasNext?'secondary':'primary'} disabled={busy}><Check size={16}/>{previous?'保存复审决定':'确认批准'}</button>{hasNext&&<button className="primary" disabled={busy} value="next">批准并下一条<ChevronRight size={16}/></button>}</div>
+  <fieldset className="review-outcomes"><legend>本次决定</legend><div>
+   {[['APPROVED','批准'],['EXCEPTION_APPROVED','例外批准'],['REJECTED','不批准'],['RETURNED','退回修改']].map(([value,label])=>
+    <label key={value} className={decision===value?'chosen':''}><input type="radio" name="review-outcome" value={value} checked={decision===value} onChange={()=>{setDecision(value);setError('')}}/>{label}</label>)}
+  </div></fieldset>
+  {needsReason
+   ?<label>{decision==='RETURNED'?'退回原因':'不批准原因'}<textarea required maxLength={2000} rows={2} value={reason} onChange={e=>setReason(e.target.value)}/></label>
+   :<details open={decision==='EXCEPTION_APPROVED'||previous?true:undefined}><summary>补充复审记录（选填）</summary>
+    {decision==='EXCEPTION_APPROVED'&&<label>原因类别<select value={reasonCode} onChange={e=>setReasonCode(e.target.value)}><option value="">选填</option><ReasonOptions current={reasonCode}/></select></label>}
+    {flags.filter(f=>f!=='AIR').map(f=><label key={f} className="check-row"><input type="checkbox" checked={acks.includes(f)} onChange={e=>setAcks(e.target.checked?[...acks,f]:acks.filter(x=>x!==f))}/><span>已核对 {flagLabels[f]}</span></label>)}
+    {flags.includes('AIR')&&<label className="check-row"><input type="checkbox" checked={air} onChange={e=>setAir(e.target.checked)}/><span>已单独确认空运必要性</span></label>}
+    <label>复审备注<textarea aria-label="复审备注" maxLength={2000} rows={2} value={reason} onChange={e=>setReason(e.target.value)}/></label>
+   </details>}
+  <div className="modal-actions"><button className={hasNext?'secondary':'primary'} disabled={busy}><Check size={16}/>保存决定</button>{hasNext&&<button className="primary" disabled={busy} value="next">保存并下一条<ChevronRight size={16}/></button>}</div>
  </form>
 }
 
@@ -257,10 +283,10 @@ function ActionDialog({kind,count,reviewMeta,onClose,onConfirm}:{kind:string;rev
  const names:Record<string,string>={return:'退回计划',review:'复审所选 '+count+' 行',reason:'批量填写说明',delete:'移除所选计划行',void:'作废计划'}
  return <Modal title={names[kind]} onClose={close}><div className="modal-body" inert={busy||undefined}>{error&&<Notice message={error} tone="error"/>}{kind==='review'?<><p className="muted">待复审 {reviewMeta.count} 行{reviewMeta.preserved>0&&` · 已有决定 ${reviewMeta.preserved} 行`}</p>{(reviewMeta.errors>0||reviewMeta.delayed>0)&&<Notice message={[reviewMeta.errors>0&&('数据错误 '+reviewMeta.errors+' 行'),reviewMeta.delayed>0&&('建议延迟补货 '+reviewMeta.delayed+' 行')].filter(Boolean).join(' · ')}/>}<ReviewForm flags={reviewMeta.flags} exception={reviewMeta.exception} onDirty={setReviewDirty} onConfirm={async v=>{setBusy(true);try{await onConfirm(v)}finally{setBusy(false)}}}/></>:<form onSubmit={async e=>{e.preventDefault();setBusy(true);try{await onConfirm(kind==='reason'?{reason:text,reason_code:code,...(airReason?{air_reason:airReason}:{})}:{reason:text})}catch(e:any){setError(e.message)}finally{setBusy(false)}}}>
   
-  {kind==='return'&&<p>整份计划将退回。{count>0?`已标记 ${count} 行需修改。`:'本次未指定物料。'}</p>}
+  {kind==='return'&&<p>将 {count} 行的退回原因发送给计划员，其余已保存的决定保留。</p>}
   {kind==='delete'&&<p>将从当前草稿移除 {count} 行物料。</p>}
   {kind==='reason'&&<><p>说明将应用于已选中的 {count} 行，请确保需求依据一致。</p><label>原因类别<select required value={code} onChange={e=>setCode(e.target.value)}><option value="">请选择</option><ReasonOptions/></select></label></>}
-  {['return','void','reason'].includes(kind)&&<label>{kind==='return'?'退回原因':kind==='void'?'作废原因':'计划说明'}<textarea rows={4} required value={text} onChange={e=>setText(e.target.value)} maxLength={2000}/></label>}
+  {['return','void','reason'].includes(kind)&&<label>{kind==='return'?'整份计划备注（选填）':kind==='void'?'作废原因':'计划说明'}<textarea rows={4} required={kind!=='return'} value={text} onChange={e=>setText(e.target.value)} maxLength={2000}/></label>}
   {kind==='reason'&&<label>空运说明（仅在需要统一补充时填写）<textarea rows={2} value={airReason} onChange={e=>setAirReason(e.target.value)}/></label>}
   <div className="modal-actions"><button type="button" className="secondary" disabled={busy} onClick={close}>返回</button><button className="primary" disabled={busy}>{busy?'正在处理…':'确认'}</button></div>
  </form>}</div></Modal>
