@@ -5,6 +5,7 @@ from xml.dom import minidom
 from zipfile import ZipFile
 
 from .periods import previous_sales_months
+from .workbook_language import english_workbook
 
 
 _DIRECTORY = Path(__file__).parent / "templates"
@@ -15,9 +16,10 @@ WORKBOOK_TEMPLATES = {
 }
 
 
-def dated_v3_template(period):
+def dated_v3_template(period, lang="zh"):
     asset,_=WORKBOOK_TEMPLATES["v3"]
-    return _month_headers(asset,asset.stat().st_mtime_ns,previous_sales_months(period))
+    render = english_workbook if lang == "en" else _month_headers
+    return render(asset,asset.stat().st_mtime_ns,previous_sales_months(period))
 
 
 @lru_cache(maxsize=8)

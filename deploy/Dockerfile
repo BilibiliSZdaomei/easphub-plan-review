@@ -23,7 +23,7 @@ WORKDIR /app
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid 10001 --no-create-home app && mkdir /app/data && chown 10001:10001 /app/data
 COPY --from=dependencies /install /usr/local
 COPY backend ./backend
-COPY scripts/serve_container.py scripts/run_worker.py scripts/healthcheck.py scripts/bootstrap.py scripts/backup_restore.py ./scripts/
+COPY scripts/serve_container.py scripts/run_worker.py scripts/healthcheck.py scripts/bootstrap.py scripts/restore_accounts.py scripts/backup_restore.py ./scripts/
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY deploy/warehouses.example.json ./deploy/warehouses.example.json

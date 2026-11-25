@@ -8,18 +8,29 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from xml.etree.ElementTree import ParseError
 
-from .adapters import MAX_BYTES, MAX_ROWS
+from .adapters import MAX_BYTES, MAX_ROWS, ENGLISH_FIELDS
 from .governance import MASTER_FIELDS, master_value
+from .workbook_language import canonical_workbook_header
+
+MASTER_ENGLISH = {**{key: ENGLISH_FIELDS[key] for key in MASTER_FIELDS if key in ENGLISH_FIELDS},
+                  'material_name': 'Part description',
+                  'large_value_flag': 'High-value, bulky part',
+                  'replacement_rate': 'Replacement rate',
+                  'replacement_months': 'Replacement coverage (months)',
+                  'sales_months': 'Sales coverage (months)',
+                  'use_fixed_targets': 'Use source targets'}
 
 HEADERS={label:key for key,label in {'material_code':'物料号',**MASTER_FIELDS}.items()}
 HEADERS.update({'物料名称':'material_name','本地 ABC':'local_abc','物料分类 ABC':'material_abc','是否是重点车型':'is_key_model',
                 '稳态更换率':'replacement_rate','目标库存-稳态更换率':'replacement_target','目标库存-销量':'sales_target'})
 
+HEADERS.update({label:key for key,label in {'material_code':ENGLISH_FIELDS['material_code'],**MASTER_ENGLISH}.items()})
+
 def collect_master(rows, formulas=None):
     header=next(rows,())
     indices={}
     for idx,raw in enumerate(header):
-        label=str(raw or '').split('\n')[0].strip()
+        label=str(canonical_workbook_header(raw) or '').split('\n')[0].strip()
         key=HEADERS.get(label)
         if key:
             if key in indices: raise ValueError(f'表头重复 · {label}')

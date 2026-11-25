@@ -1,3 +1,4 @@
+import {tr, systemText} from './i18n'
 type Field = [string, string, ('text'|'number'|'flag'|'rate')?]
 type Edits = Record<string, string | string[]>
 const material: Field[] = [
@@ -15,8 +16,8 @@ export const referenceLabels:Record<string,string> = Object.fromEntries([
  ['avg_sales_3m','三个月月均销量'],['avg_sales_6m','六个月月均销量'],
 ].map(([key,label])=>[key,label]))
 
-export default function PlanReference({input,changes,onChange,readOnly=false,basis,componentNet=false,omitDescription=false}:{
- input:Record<string,any>;changes:Edits;onChange:(next:Edits)=>void;readOnly?:boolean;basis?:{values:Record<string,unknown>;targets:Record<string,{months:string;fallback?:boolean}>};componentNet?:boolean;omitDescription?:boolean
+export default function PlanReference({input,changes,onChange,readOnly=false,basis,componentNet=false,omitDescription=false,requireSales=false,salesOnly=false}:{
+ input:Record<string,any>;changes:Edits;onChange:(next:Edits)=>void;readOnly?:boolean;basis?:{values:Record<string,unknown>;targets:Record<string,{months:string;fallback?:boolean}>};componentNet?:boolean;omitDescription?:boolean;requireSales?:boolean;salesOnly?:boolean
 }){
  const labels:string[]=input.month_labels||Object.keys(input.monthly_sales||{})
  const monthKeys=labels.length===6?labels:defaultMonths
@@ -34,25 +35,28 @@ export default function PlanReference({input,changes,onChange,readOnly=false,bas
    const formula=basis?.targets[key]
    const managed=!!basis && Object.prototype.hasOwnProperty.call(basis.values,key)
    const value=managed?base:String(changes[key]??base)
-   const origin=formula?(formula.fallback?'来源目标':'按 '+formula.months+' 个月计算'):managed?'仓库主数据':''
+   const origin=formula?(formula.fallback?systemText("来源目标"):systemText("按 ")+formula.months+systemText(" 个月计算")):managed?systemText("仓库主数据"):''
    const locked=managed||readOnly||(componentNet&&key==='net_supply_before_plan')
-   return <label key={key}>{label}{origin&&<small>{origin}</small>}{locked?<output>{type==='flag'?value==='true'?'是':value==='false'?'否':'—':type==='rate'&&value!==''&&Number.isFinite(Number(value))?new Intl.NumberFormat('zh-CN',{style:'percent',maximumFractionDigits:9}).format(Number(value)):value||'—'}</output>
-    :type==='flag'?<select value={value} onChange={e=>change(key,e.target.value,e.target.value===base)}><option value="">未提供</option><option value="true">是</option><option value="false">否</option></select>
-    :<input type={type==='number'?'number':'text'} step={type==='number'?'any':undefined} maxLength={300}
-      placeholder={type==='rate'?'例如 2%':undefined} value={value} onChange={e=>change(key,e.target.value,e.target.value===base)}/>}</label>
+   const required=requireSales&&(key==='current_sales'||key==='shortage_qty')
+   return <label key={key}>{systemText(label)}{required&&<small>{systemText("必填")}</small>}{origin&&<small>{origin}</small>}{locked?<output>{type==='flag'?value==='true'?systemText("是"):value==='false'?systemText("否"):'—':type==='rate'&&value!==''&&Number.isFinite(Number(value))?new Intl.NumberFormat(tr('zh-CN','en-GB'),{style:'percent',maximumFractionDigits:9}).format(Number(value)):value||'—'}</output>
+    :type==='flag'?<select value={value} onChange={e=>change(key,e.target.value,e.target.value===base)}><option value="">{systemText("未提供")}</option><option value="true">{systemText("是")}</option><option value="false">{systemText("否")}</option></select>
+    :<input type={type==='number'?'number':'text'} required={required} min={required?0:undefined} step={type==='number'?'any':undefined} maxLength={300}
+      placeholder={type==='rate'?systemText("例如 2%"):undefined} value={value} onChange={e=>change(key,e.target.value,e.target.value===base)}/>}</label>
   })}</div></fieldset>
  }
+ if(salesOnly)return <div className="plan-reference">{fields(systemText("本期数量"),optional.slice(1))}</div>
  return <div className="plan-reference">
-  {fields('物料与车辆',omitDescription?material.slice(1):material)}
-  {fields('库存与供给',componentNet?[inventory[0],...components,inventory[1]]:inventory)}
-  <fieldset><legend>近六个月销量 <small>从早到晚</small></legend><div className="reference-months">{monthKeys.map((key,n)=>{
+  {requireSales&&fields(systemText("本期数量"),optional.slice(1))}
+  {fields(systemText("物料与车辆"),omitDescription?material.slice(1):material)}
+  {fields(systemText("库存与供给"),componentNet?[inventory[0],...components,inventory[1]]:inventory)}
+  <fieldset><legend>{systemText("近六个月销量")} <small>{systemText("从早到晚")}</small></legend><div className="reference-months">{monthKeys.map((key,n)=>{
    const label=key.match(/^\d{4}-\d{2}/)?.[0]||key.replace('（最早）','').replace('（最近）','')
-   return <label key={key}>{label}{readOnly?<output>{months[n]||'—'}</output>:<input type="number" min="0" step="any" value={months[n]} onChange={e=>{
+   return <label key={key}>{systemText(label)}{readOnly?<output>{months[n]||'—'}</output>:<input type="number" min="0" step="any" value={months[n]} onChange={e=>{
     const next=months.map((v,pos)=>pos===n?e.target.value:v)
     change('monthly_sales',next,next.every((v,pos)=>v===original[pos]))
    }}/>}</label>
   })}</div></fieldset>
-  {fields('目标库存',targets)}
-  <details className="evidence-details"><summary>其他来源字段</summary>{fields('辅助信息',optional)}</details>
+  {fields(systemText("目标库存"),targets)}
+  <details className="evidence-details"><summary>{systemText("其他来源字段")}</summary>{fields(systemText("辅助信息"),requireSales?optional.slice(0,1):optional)}</details>
  </div>
 }

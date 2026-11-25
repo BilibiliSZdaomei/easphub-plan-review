@@ -128,5 +128,5 @@ def test_v2_workbook_through_review_and_export(clients):
     historical=calculate(i,old)
     assert 'delay_replenishment' not in historical
     replay=load_workbook(BytesIO(export_workbook({'items':[{'input':i,'result':historical}],'rule_package':old})))
-    assert replay.active['AI2'].value is None and replay.active.max_column==51
+    assert replay['计划审核结果']['AI2'].value is None and replay['计划审核结果'].max_column==51
     replay.close()

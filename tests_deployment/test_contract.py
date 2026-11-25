@@ -11,7 +11,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
-from sqlalchemy import select, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateTable
 
@@ -49,6 +49,9 @@ def test_prefix_authentication_and_csrf(fixture):
         response = client.get(PREFIX+'?x=%2Fhello%20world',follow_redirects=False)
         assert response.status_code == 307 and response.headers['location']==PREFIX+'/?x=%2Fhello%20world'
         html = client.get(PREFIX+'/').text
+        for icon in (directory/'ui'/'assets').glob('*.svg'):
+            assert client.get(PREFIX+'/assets/'+icon.name).headers['content-type']=='image/svg+xml'
+
         assert client.get(PREFIX+'/nested/refresh?q=test').text == html
         assert client.get(PREFIX+'/api/v1/not-an-api').status_code == 404
         response = login(client)
@@ -133,18 +136,43 @@ def test_real_readiness_failure_and_recovery(fixture):
 
 
 def test_mysql_ddl_and_unchanged_active_rule_invariant(fixture):
-    from backend.db import Base, engine, Rule, transaction
+    from backend.db import Base, engine, Rule, SCHEMA_REVISION, transaction
     from sqlalchemy.exc import IntegrityError
-    assert len(Base.metadata.tables)==13
+    migrated_tables = set(inspect(engine).get_table_names()) - {'alembic_version'}
+    assert migrated_tables == set(Base.metadata.tables)
+    registration = (ROOT/'deploy/registration.yml').read_text(encoding='utf-8')
+    assert f"schema_head: '{SCHEMA_REVISION}'" in registration
     for table in Base.metadata.sorted_tables:
         ddl = str(CreateTable(table).compile(dialect=mysql.dialect()))
         assert 'VARCHAR(' in ddl and 'VARCHAR,' not in ddl
     environment = dict(os.environ)
     environment['PLAN_REVIEW_DATABASE_URL']='mysql+pymysql://synthetic:synthetic@127.0.0.1:1/synthetic'
     compiled = subprocess.run([sys.executable,'-m','alembic','upgrade','head','--sql'],cwd=ROOT,env=environment,capture_output=True,text=True,check=True)
+    assert 'UPDATE notifications AS n' in compiled.stdout and 'SHA2(CONCAT(e.id,n.user_id),256)' in compiled.stdout
+    assert 'UPDATE notification_events AS e' in compiled.stdout and "JSON_SET(e.payload,'$.kind'" in compiled.stdout
     assert 'VARCHAR(255)' in compiled.stdout and 'COLLATE utf8mb4_0900_bin' in compiled.stdout
     assert 'CASE WHEN active = 1 THEN 1 ELSE NULL END' in compiled.stdout
     assert 'DOUBLE' in compiled.stdout
+    assert 'CREATE TABLE plan_undo' in compiled.stdout and 'CREATE TABLE plan_redo' in compiled.stdout
+    assert 'LONGBLOB' in compiled.stdout
+    avatar_ddl = compiled.stdout.split('CREATE TABLE user_avatars (', 1)[1].split(';', 1)[0]
+    assert 'user_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL' in avatar_ddl
+    assert 'PRIMARY KEY (user_id)' in avatar_ddl
+    assert 'FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE' in avatar_ddl
+    assert 'config JSON,' in avatar_ddl and 'revision VARCHAR(40) NOT NULL' in avatar_ddl
+    for name in ('usage_days','usage_metrics','usage_receipts','usage_presence'):
+        assert 'CREATE TABLE ' + name + ' (' in compiled.stdout
+    metric_ddl = compiled.stdout.split('CREATE TABLE usage_metrics (', 1)[1].split(';', 1)[0]
+    assert 'PRIMARY KEY (user_id, day, kind, page, device, target, cell)' in metric_ddl
+    assert 'FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE' in metric_ddl
+    presence_ddl = compiled.stdout.split('CREATE TABLE usage_presence (', 1)[1].split(';', 1)[0]
+    assert 'FOREIGN KEY(session_hash) REFERENCES sessions (token_hash) ON DELETE CASCADE' in presence_ddl
+    for table,field in (('usage_metrics','day'),('usage_days','day'),('usage_presence','last_seen'),('usage_receipts','expires')):
+        assert f'CREATE INDEX ix_{table}_{field} ON {table} ({field})' in compiled.stdout
+    assert 'ALTER TABLE users ADD COLUMN email VARCHAR(254)' in compiled.stdout
+    mail_ddl = compiled.stdout.split('CREATE TABLE workflow_mail (', 1)[1].split(';', 1)[0]
+    assert 'destination VARCHAR(254)' in mail_ddl and 'payload JSON NOT NULL' in mail_ddl
+    assert 'FOREIGN KEY(recipient_id) REFERENCES users (id) ON DELETE CASCADE' in mail_ddl
     evidence = artifact_root(ROOT, 'plan-review') / 'mysql-schema.sql'
     evidence.parent.mkdir(parents=True,exist_ok=True)
     evidence.write_text(compiled.stdout,encoding='utf-8')

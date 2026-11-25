@@ -1,0 +1,2 @@
+.warehouse-label { display: inline-flex; align-items: center; gap: .45em; vertical-align: baseline; max-width: 100%; }
+.warehouse-flag { display: inline-block; flex: 0 0 auto; width: 20px; height: 15px; object-fit: contain; border-radius: 2px; box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 12%, transparent); }

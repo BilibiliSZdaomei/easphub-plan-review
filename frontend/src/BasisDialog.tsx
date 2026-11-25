@@ -1,3 +1,4 @@
+import {systemText} from './i18n'
 import {useEffect, useRef, useState} from 'react'
 import {api} from './api'
 import SnapshotPicker from './SnapshotPicker'
@@ -91,24 +92,24 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
     }
   }
 
-  return <Modal title="更换计算依据" onClose={close} wide>
+  return <Modal title={systemText("更换计算依据")} onClose={close} wide>
     <div className="modal-body">
-      {optionsError && <><Notice message={optionsError} tone="error"/><button className="text-button" type="button" onClick={()=>setOptionsAttempt(v=>v+1)}>重新加载快照</button></>}
-      {loading ? <Busy text="读取快照…"/> :
+      {optionsError && <><Notice message={optionsError} tone="error"/><button className="text-button" type="button" onClick={()=>setOptionsAttempt(v=>v+1)}>{systemText("重新加载快照")}</button></>}
+      {loading ? <Busy text={systemText("读取快照…")}/> :
         !optionsError && (snapshots.length>0
-          ? <SnapshotPicker required={!!currentSnapshotId} emptyText={currentSnapshotId?'选择本仓快照':'使用计划自带数据'} snapshots={snapshots} value={snapshotId} disabled={saving} onChange={setSnapshotId}/>
-          : <Notice message="本计划使用自带的基础数据。" tone="info"/>)}
-      {<label>审核标准<select value={ruleId} disabled={saving || ver.latest_rule_id===ver.rule.id} onChange={e=>setRuleId(e.target.value)}>
+          ? <SnapshotPicker required={!!currentSnapshotId} emptyText={currentSnapshotId?systemText("选择本仓快照"):systemText("使用计划自带数据")} snapshots={snapshots} value={snapshotId} disabled={saving} onChange={setSnapshotId}/>
+          : <Notice message={systemText("本计划使用自带的基础数据。")} tone="info"/>)}
+      {<label>{systemText("审核标准")}<select value={ruleId} disabled={saving || ver.latest_rule_id===ver.rule.id} onChange={e=>setRuleId(e.target.value)}>
         <option value={ver.rule.id}>{ver.rule.name}</option>
-        {ver.latest_rule_id!==ver.rule.id && <option value={ver.latest_rule_id}>{ver.latest_rule_name || '仓库最新审核标准'}</option>}
+        {ver.latest_rule_id!==ver.rule.id && <option value={ver.latest_rule_id}>{ver.latest_rule_name || systemText("仓库最新审核标准")}</option>}
       </select></label>}
-      {previewing && <Busy text="正在预览影响…"/>}
-      {error && <><Notice message={error} tone="error"/><button className="text-button" type="button" onClick={()=>setAttempt(v=>v+1)}>重新预览</button></>}
-      {ready && preview && <section className="basis-impact" aria-label="更换影响">
-        <div className="change-summary" role="status"><strong>影响 {preview.affected_count} 行</strong><span>数量结论变化 {preview.quantity_changed_count} 行</span><span>数据状态变化 {preview.data_changed_count} 行</span></div>
-        {preview.items.length>0 && <details className="basis-impact-detail"><summary>查看影响明细</summary><ChangeList key={snapshotId+ruleId} items={preview.items} columns={['当前','更换后']} filename="更换依据差异"/></details>}
+      {previewing && <Busy text={systemText("正在预览影响…")}/>}
+      {error && <><Notice message={error} tone="error"/><button className="text-button" type="button" onClick={()=>setAttempt(v=>v+1)}>{systemText("重新预览")}</button></>}
+      {ready && preview && <section className="basis-impact" aria-label={systemText("更换影响")}>
+        <div className="change-summary" role="status"><strong>{systemText("影响")} {preview.affected_count} {systemText("行")}</strong><span>{systemText("数量结论变化")} {preview.quantity_changed_count} {systemText("行")}</span><span>{systemText("数据状态变化")} {preview.data_changed_count} {systemText("行")}</span></div>
+        {preview.items.length>0 && <details className="basis-impact-detail"><summary>{systemText("查看影响明细")}</summary><ChangeList key={snapshotId+ruleId} items={preview.items} columns={[systemText("当前"),systemText("更换后")]} filename={systemText("更换依据差异")}/></details>}
       </section>}
-      <div className="modal-actions"><button type="button" className="secondary" disabled={saving} onClick={close}>{snapshots.length?'取消':'关闭'}</button>{(snapshots.length>0||ver.latest_rule_id!==ver.rule.id)&&<button type="button" className="primary" disabled={!ready || saving || !!optionsError} onClick={save}>{saving?'正在保存…':'确认更换'}</button>}</div>
+      <div className="modal-actions"><button type="button" className="secondary" disabled={saving} onClick={close}>{snapshots.length?systemText("取消"):systemText("关闭")}</button>{(snapshots.length>0||ver.latest_rule_id!==ver.rule.id)&&<button type="button" className="primary" disabled={!ready || saving || !!optionsError} onClick={save}>{saving?systemText("正在保存…"):systemText("确认更换")}</button>}</div>
     </div>
   </Modal>
 }

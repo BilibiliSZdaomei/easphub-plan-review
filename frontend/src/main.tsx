@@ -1,6 +1,7 @@
 import {createRoot} from 'react-dom/client'
 import App from './App'
 import './styles.css'
+import './review-table-layout.css'
 function initialTheme(): 'light'|'dark' {
  const query = new URLSearchParams(location.search).get('mode')
  if(query==='light'||query==='dark')return query

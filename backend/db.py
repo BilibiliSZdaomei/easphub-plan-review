@@ -6,15 +6,16 @@ import uuid
 from contextvars import ContextVar
 import logging
 REQUEST_ID=ContextVar('request_id',default='background')
-from sqlalchemy import create_engine, event, Column, String, Integer, Boolean, Text, JSON, Float, ForeignKey, UniqueConstraint,Index
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, event, Column, String, Integer, Boolean, Date, Text, JSON, Float, ForeignKey, UniqueConstraint,Index
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy import LargeBinary
 from sqlalchemy.dialects import mysql
 # MySQL needs explicit VARCHAR sizes. Other dialects keep their existing type.
 # Case/accent-sensitive comparisons preserve the local SQLite identity semantics.
 STRING = String().with_variant(mysql.VARCHAR(255, charset='utf8mb4', collation='utf8mb4_0900_bin'), 'mysql')
 REAL = Float().with_variant(mysql.DOUBLE(), 'mysql')
 from .settings import data_directory, database_url
-SCHEMA_REVISION = '0006'
+SCHEMA_REVISION = '0013'
 
 ROOT=Path(__file__).resolve().parents[1]
 DATA=data_directory()
@@ -34,13 +35,51 @@ class User(Base):
     __tablename__='users'
     id=Column(STRING,primary_key=True,default=uid); username=Column(STRING,unique=True,nullable=False)
     name=Column(STRING,nullable=False); password_hash=Column(Text,nullable=False)
+    email=Column(String(254),nullable=True)
     roles=Column(JSON,nullable=False); warehouses=Column(JSON,nullable=False)
     active=Column(Boolean,default=True,nullable=False); created_at=Column(STRING,default=now)
+    avatar=relationship('UserAvatar',uselist=False,viewonly=True)
+
+class UserAvatar(Base):
+    __tablename__='user_avatars'
+    user_id=Column(STRING,ForeignKey('users.id',ondelete='CASCADE'),primary_key=True)
+    preset=Column(String(16),nullable=False)
+    source=Column(String(32),nullable=False)
+    revision=Column(String(40),nullable=False)
+    config=Column(JSON(none_as_null=True),nullable=True)
 
 class LoginSession(Base):
     __tablename__='sessions'
     token_hash=Column(STRING,primary_key=True); user_id=Column(STRING,ForeignKey('users.id'),nullable=False)
     csrf=Column(STRING,nullable=False); expires=Column(REAL,nullable=False)
+
+
+class UsageDay(Base):
+    __tablename__='usage_days'
+    user_id=Column(STRING,ForeignKey('users.id',ondelete='CASCADE'),primary_key=True)
+    day=Column(Date,primary_key=True,index=True)
+    views=Column(Integer,nullable=False); clicks=Column(Integer,nullable=False); friction=Column(Integer,nullable=False)
+
+
+class UsageMetric(Base):
+    __tablename__='usage_metrics'
+    user_id=Column(STRING,ForeignKey('users.id',ondelete='CASCADE'),primary_key=True)
+    day=Column(Date,primary_key=True,index=True)
+    kind=Column(String(12),primary_key=True); page=Column(String(12),primary_key=True)
+    device=Column(String(8),primary_key=True); target=Column(String(12),primary_key=True)
+    cell=Column(Integer,primary_key=True); count=Column(Integer,nullable=False)
+
+
+class UsageReceipt(Base):
+    __tablename__='usage_receipts'
+    id=Column(String(64),primary_key=True); digest=Column(String(64),nullable=False)
+    nonce=Column(String(32),nullable=False); expires=Column(REAL,nullable=False,index=True)
+
+
+class UsagePresence(Base):
+    __tablename__='usage_presence'
+    session_hash=Column(STRING,ForeignKey('sessions.token_hash',ondelete='CASCADE'),primary_key=True)
+    last_seen=Column(REAL,nullable=False,index=True)
 
 class Warehouse(Base):
     __tablename__='warehouses'
@@ -73,6 +112,24 @@ class NotificationEvent(Base):
     attempts=Column(Integer,default=0,nullable=False);lease=Column(REAL,default=0,nullable=False)
     created_at=Column(STRING,default=now);error=Column(STRING)
 
+
+class WorkflowMail(Base):
+    __tablename__='workflow_mail'
+    id=Column(String(64),primary_key=True)
+    event_id=Column(String(32),nullable=False)
+    recipient_id=Column(STRING,ForeignKey('users.id',ondelete='CASCADE'),nullable=False)
+    kind=Column(String(16),nullable=False)
+    warehouse=Column(STRING,nullable=False)
+    batch_id=Column(STRING,nullable=False); version_id=Column(STRING,nullable=False)
+    destination=Column(String(254),nullable=True); payload=Column(JSON,nullable=False)
+    state=Column(String(20),nullable=False); attempts=Column(Integer,nullable=False,default=0)
+    next_attempt_at=Column(REAL,nullable=False,default=0); lease_until=Column(REAL,nullable=False,default=0)
+    lease_token=Column(String(64),nullable=True); last_error=Column(Text,nullable=True)
+    created_at=Column(STRING,nullable=False,default=now); sent_at=Column(STRING,nullable=True)
+    __table_args__=(Index('ix_workflow_mail_due','state','next_attempt_at'),
+                    Index('ix_workflow_mail_lease','state','lease_until'),
+                    Index('ix_workflow_mail_recipient','recipient_id','state'))
+
 class Snapshot(Base):
     __tablename__='snapshots'
     id=Column(STRING,primary_key=True,default=uid); warehouse=Column(STRING,ForeignKey('warehouses.code'),nullable=False,index=True)
@@ -101,6 +158,24 @@ class Version(Base):
     __table_args__=(UniqueConstraint('batch_id','seq'),)
     __mapper_args__={'version_id_col':revision}
 
+class PlanHistoryEntry(Base):
+    __abstract__ = True
+    version_id = Column(STRING, ForeignKey('versions.id'), primary_key=True)
+    revision = Column(Integer, primary_key=True)
+    actor_id = Column(STRING, nullable=False)
+    label = Column(STRING, nullable=False)
+    row_count = Column(Integer, nullable=False)
+    payload = Column(LargeBinary().with_variant(mysql.LONGBLOB(), 'mysql'), nullable=False)
+
+
+class PlanUndo(PlanHistoryEntry):
+    __tablename__ = 'plan_undo'
+
+
+class PlanRedo(PlanHistoryEntry):
+    __tablename__ = 'plan_redo'
+
+
 class Audit(Base):
     __tablename__='audit'
     id=Column(STRING,primary_key=True,default=uid); user_id=Column(STRING,nullable=False)
@@ -111,6 +186,8 @@ class Notification(Base):
     __tablename__='notifications'
     id=Column(STRING,primary_key=True,default=uid); user_id=Column(STRING,ForeignKey('users.id'),nullable=False,index=True)
     batch_id=Column(STRING,nullable=False); warehouse=Column(STRING,nullable=False)
+    kind=Column(STRING); version_id=Column(STRING); occurred_at=Column(STRING)
+    __table_args__=(Index('ix_notice_inbox','user_id','created_at'),Index('ix_notice_version','user_id','version_id'))
     text=Column(Text,nullable=False); seen=Column(Boolean,default=False,nullable=False); created_at=Column(STRING,default=now)
 
 class Job(Base):

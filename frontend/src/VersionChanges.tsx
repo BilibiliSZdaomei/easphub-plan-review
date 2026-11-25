@@ -1,3 +1,5 @@
+import {systemText} from './i18n'
+import {planMessage} from './planMessages'
 import {useMemo, useState} from 'react'
 import {ChevronLeft, ChevronRight, Download, Search} from 'lucide-react'
 import {flagLabels, labels, reasonLabel} from './api'
@@ -45,41 +47,41 @@ const fieldLabels: Record<string,string> = {
 const groups = [
   ['fields', '计划'], ['result_fields','计算'], ['decision_fields','复审'], ['override_fields','提交提醒'],
 ] as const
-const enumLabels: Record<string,string> = {
-  ...labels, ...flagLabels, AUTO:'自动计算', MANUAL:'人工判断', maintenance:'保养件', dangerous:'危包',
+const enumLabels: Record<string,string> = { AUTO:'自动计算', MANUAL:'人工判断', maintenance:'保养件', dangerous:'危包',
   no_stock:'不备货', manual:'人工判断', small:'小件', submit:'提交', finalize:'终审',
 }
 const translated = new Set(['quantity_status','data_status','review_mode','status','stage','override','manual_flags','ack_flags'])
 
 function describe(value: unknown, field: string): string {
   if (value === null || value === undefined || value === '') return '—'
-  if (typeof value === 'boolean') return value ? '是' : '否'
-  if (Array.isArray(value)) return value.length ? value.map(v => describe(v,field)).join('、') : '无'
+  if (typeof value === 'boolean') return value ? systemText("是") : systemText("否")
+  if (Array.isArray(value)) return value.length ? value.map(v => describe(v,field)).join('、') : systemText("无")
   if (typeof value === 'object') {
     const record = value as Record<string,unknown>
-    if (typeof record.message === 'string') return record.message
+    if (typeof record.message === 'string') return planMessage(record.message)
     return Object.entries(record).filter(([,v]) => !(Array.isArray(v) && !v.length))
-      .map(([k,v]) => (enumLabels[k] || fieldLabels[k] || k)+'：'+describe(v,k)).join('；') || '无'
+      .map(([k,v]) => systemText(enumLabels[k] || fieldLabels[k] || k)+'：'+describe(v,k)).join('；') || systemText("无")
   }
   const text = String(value)
   if (field === 'reason_code') return reasonLabel(text)
   if (field === 'manual_flags' || field === 'ack_flags') return flagLabels[text] || text
-  return translated.has(field) ? enumLabels[text] || text : text
+  if (['advice','explanation','turnover_warning'].includes(field)) return planMessage(text)
+  return translated.has(field) ? systemText(enumLabels[text] || labels[text] || flagLabels[text] || text) : text
 }
 
 function differences(row: ChangedItem) {
   return groups.flatMap(([key,group]) => Object.entries(row[key] || {}).map(([field,values]) => ({
-    group, field, label: field === 'reason' && key !== 'fields' ? '依据说明' : fieldLabels[field] || field,
+    group:systemText(group), field, label: field === 'reason' && key !== 'fields' ? systemText("依据说明") : systemText(fieldLabels[field] || field),
     before: describe(values.before,field), after: describe(values.after,field),
   })))
 }
 
 function exportChanges(rows: ChangedItem[], filename: string, columns: [string,string]) {
-  const data = [['物料号','物料名称','变更','类别','字段',...columns]]
+  const data = [[systemText("物料号"),systemText("物料名称"),systemText("变更"),systemText("类别"),systemText("字段"),...columns]]
   rows.forEach(row => {
     const changed = differences(row)
-    if (!changed.length) data.push([row.material_code,row.material_name || '',row.change,'','','',''])
-    changed.forEach(c => data.push([row.material_code,row.material_name || '',row.change,c.group,c.label,c.before,c.after]))
+    if (!changed.length) data.push([row.material_code,row.material_name || '',systemText(row.change),'','','',''])
+    changed.forEach(c => data.push([row.material_code,row.material_name || '',systemText(row.change),c.group,c.label,c.before,c.after]))
   })
   const escapeCell = (value: string) => {
     const safe = /^\s*[=+@-]/.test(value) && !/^-?\d+(\.\d+)?$/.test(value) ? "'"+value : value
@@ -94,6 +96,7 @@ function exportChanges(rows: ChangedItem[], filename: string, columns: [string,s
   setTimeout(() => URL.revokeObjectURL(url),1000)
 }
 
+const CHANGE_KINDS = ['新增','修改','删除']
 const pageSize = 20
 export function ChangeList({items, columns, filename}: {items: ChangedItem[]; columns: [string,string]; filename: string}) {
   const [search,setSearch] = useState('')
@@ -110,34 +113,34 @@ export function ChangeList({items, columns, filename}: {items: ChangedItem[]; co
 
   return <div className="change-list">
     <div className="list-toolbar diff-toolbar">
-      <div className="search"><Search size={16}/><input type="search" aria-label="搜索变更物料" placeholder="搜索物料号或名称" value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}}/></div>
-      {new Set(items.map(row => row.change)).size>1 && <select aria-label="变更类型" value={kind} onChange={e=>{setKind(e.target.value);setPage(1)}}><option value="">全部变更</option>{['新增','修改','删除'].map(t=><option key={t}>{t}</option>)}</select>}
-      <button type="button" className="text-button" disabled={!filtered.length} onClick={()=>exportChanges(filtered,filename,columns)}><Download size={14}/>导出差异</button>
+      <div className="search"><Search size={16}/><input type="search" aria-label={systemText("搜索变更物料")} placeholder={systemText("搜索物料号或名称")} value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}}/></div>
+      {new Set(items.map(row => row.change)).size>1 && <select aria-label={systemText("变更类型")} value={kind} onChange={e=>{setKind(e.target.value);setPage(1)}}><option value="">{systemText("全部变更")}</option>{CHANGE_KINDS.map(t=><option key={t} value={t}>{systemText(t)}</option>)}</select>}
+      <button type="button" className="text-button" disabled={!filtered.length} onClick={()=>exportChanges(filtered,filename,columns)}><Download size={14}/>{systemText("导出差异")}</button>
     </div>
     <div className="change-rows">{filtered.slice(start,start+pageSize).map(row => {
       const changes = differences(row)
       return <details className="change-row" key={row.material_code}>
-        <summary><strong>{row.material_code}</strong> <span>{row.material_name}</span> <small>{row.change} · {changes.length} 项</small></summary>
-        {changes.length>0 && <div className="table-scroll"><table className="simple-table change-fields"><thead><tr><th>字段</th><th>{columns[0]}</th><th>{columns[1]}</th></tr></thead>
+        <summary><strong>{row.material_code}</strong> <span>{row.material_name}</span> <small>{systemText(row.change)} · {changes.length} {systemText("项")}</small></summary>
+        {changes.length>0 && <div className="table-scroll"><table className="simple-table change-fields"><thead><tr><th>{systemText("字段")}</th><th>{columns[0]}</th><th>{columns[1]}</th></tr></thead>
           <tbody>{changes.map(({group,field,label,before,after})=><tr key={group+field}><th scope="row"><small>{group}</small> {label}</th><td>{before}</td><td>{after}</td></tr>)}</tbody>
         </table></div>}
       </details>
     })}</div>
-    {!filtered.length && <p className="empty-inline">无匹配物料</p>}
-    <div className="table-footer"><span>{filtered.length ? (start+1)+'–'+Math.min(start+pageSize,filtered.length)+' / '+filtered.length : '0'} 行</span>
-      {pages>1 && <div className="pagination"><button type="button" className="icon-button" aria-label="上一页差异" disabled={position===1} onClick={()=>setPage(position-1)}><ChevronLeft size={16}/></button><span>{position} / {pages}</span><button type="button" className="icon-button" aria-label="下一页差异" disabled={position===pages} onClick={()=>setPage(position+1)}><ChevronRight size={16}/></button></div>}
+    {!filtered.length && <p className="empty-inline">{systemText("无匹配物料")}</p>}
+    <div className="table-footer"><span>{filtered.length ? (start+1)+'–'+Math.min(start+pageSize,filtered.length)+' / '+filtered.length : '0'} {systemText("行")}</span>
+      {pages>1 && <div className="pagination"><button type="button" className="icon-button" aria-label={systemText("上一页差异")} disabled={position===1} onClick={()=>setPage(position-1)}><ChevronLeft size={16}/></button><span>{position} / {pages}</span><button type="button" className="icon-button" aria-label={systemText("下一页差异")} disabled={position===pages} onClick={()=>setPage(position+1)}><ChevronRight size={16}/></button></div>}
     </div>
   </div>
 }
 
 export default function VersionChanges({diff}: {diff: Diff}) {
-  const columns: [string,string] = [diff.from_version ? 'V'+diff.from_version.seq : '对比版本',diff.to_version ? 'V'+diff.to_version.seq : '当前版本']
+  const columns: [string,string] = [diff.from_version ? 'V'+diff.from_version.seq : systemText("对比版本"),diff.to_version ? 'V'+diff.to_version.seq : systemText("当前版本")]
   const summary = diff.summary
   return <div className="version-changes">
-    <div className="change-summary"><strong>{columns[0]} → {columns[1]}</strong><span>新增 {summary.added} · 修改 {summary.modified} · 删除 {summary.removed}</span>
-      {diff.rule_changed && <span>审核标准已更换</span>}{diff.snapshot_changed && <span>数据快照已更换</span>}
+    <div className="change-summary"><strong>{columns[0]} → {columns[1]}</strong><span>{systemText("新增")} {summary.added} {systemText("· 修改")} {summary.modified} {systemText("· 删除")} {summary.removed}</span>
+      {diff.rule_changed && <span>{systemText("审核标准已更换")}</span>}{diff.snapshot_changed && <span>{systemText("数据快照已更换")}</span>}
     </div>
-    {diff.items.length>0 && <ChangeList key={columns.join('-')} items={diff.items} columns={columns} filename={'计划版本差异-'+columns.join('-')}/>}
+    {diff.items.length>0 && <ChangeList key={columns.join('-')} items={diff.items} columns={columns} filename={systemText("计划版本差异-")+columns.join('-')}/>}
   </div>
 }
 

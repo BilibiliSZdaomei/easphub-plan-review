@@ -1,0 +1,46 @@
+.personas-avatar {
+  display:block; flex:none; max-width:none; border-radius:50%; object-fit:cover;
+  box-shadow:0 0 0 1px var(--ea-line);
+}
+.profile-menu-name { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.people-profile { display:flex; align-items:center; gap:10px; }
+.people-profile > div { min-width:0; overflow-wrap:anywhere; }
+.profile-card { padding:0 clamp(16px,4vw,24px) 20px; }
+.profile-identity { display:flex; align-items:center; gap:16px; padding:20px 0; }
+.profile-identity > div { min-width:0; }
+.profile-identity strong,.profile-identity span { display:block; overflow-wrap:anywhere; }
+.profile-identity strong { color:var(--ea-ink); font-size:20px; line-height:1.3; }
+.profile-identity span { color:var(--ea-secondary); font-size:13px; margin-top:4px; }
+.profile-access { border-block:1px solid var(--ea-line); }
+.profile-access summary,.profile-access-empty { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:42px; }
+.profile-access summary { list-style:none; cursor:pointer; }
+.profile-access summary::-webkit-details-marker { display:none; }
+.profile-access summary > span:last-child,.profile-access-empty > span:last-child { display:inline-flex; align-items:center; gap:6px; color:var(--ea-secondary); font-size:13px; }
+.profile-access[open] summary svg { transform:rotate(180deg); }
+.profile-warehouses { display:flex; flex-wrap:wrap; gap:7px 14px; padding:3px 0 12px; color:var(--ea-secondary); font-size:12px; }
+.profile-actions { display:flex; align-items:center; justify-content:space-between; padding-top:16px; gap:8px; }
+
+.profile-image-button { position:relative; padding:0; border:0; background:transparent; border-radius:50%; }
+.profile-image-button svg { position:absolute; right:-2px; bottom:-1px; width:21px; height:21px; padding:4px;
+  border:1px solid var(--ea-line); border-radius:50%; background:var(--ea-base); color:var(--ea-ink); }
+.profile-facts { margin:0; }
+.profile-facts > div { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:10px 0; border-top:1px solid var(--ea-line); font-size:13px; }
+.profile-facts dt,.profile-access summary > span:first-child,.profile-access-empty > span:first-child { font-weight:600; color:var(--ea-ink); }
+.profile-facts dd { color:var(--ea-secondary); margin:0; overflow-wrap:anywhere; text-align:end; }
+.profile-facts .profile-email-help { display:block; font-size:11px; margin-top:2px; }
+.profile-edit-button { margin-top:3px; padding-inline:0; }
+.modal:has(.profile-editor-form) { width:min(744px,100%); display:flex; flex-direction:column; overflow:hidden; max-height:min(860px,calc(100dvh - 32px)); }
+.modal:has(.profile-editor-form) > .modal-head { flex:none; }
+.profile-editor-form { min-height:0; display:flex; flex-direction:column; }
+.profile-preview { position:relative; flex:none; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:5px;
+  padding:14px 18px 10px; background:var(--ea-subtle); color:var(--ea-secondary); font-size:12px; }
+.profile-preview:focus { outline:none; }
+.profile-default-button { position:absolute; top:10px; right:12px; display:inline-flex; align-items:center; gap:5px; padding:5px 9px;
+  border:1px solid var(--ea-border); border-radius:20px; background:var(--ea-base); color:var(--ea-secondary); font:inherit; cursor:pointer; }
+.profile-default-button[aria-pressed="true"] { border-color:var(--ea-action); color:var(--ea-action); background:var(--ea-action-soft); }
+[data-ea-mode="dark"] .avatar-blank { filter:invert(.88); }
+.profile-preview span { max-width:100%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.profile-editor-scroll { overflow-y:auto; overscroll-behavior:contain; padding:16px clamp(12px,4vw,24px); }
+.profile-editor-footer { flex:none; display:flex; justify-content:flex-end; gap:8px; padding:12px clamp(12px,4vw,24px); border-top:1px solid var(--ea-line); }
+@media(max-height:580px){ .profile-preview { flex-direction:row; gap:12px; padding:6px 12px; } .profile-preview img { width:50px; height:50px; } }
+@media(max-height:580px), (max-width:340px){ .profile-default-button { position:static; } }

@@ -1,15 +1,23 @@
+import {getLanguage,localizedLabels,systemText} from './i18n'
+import {requestFailure,jobFailure} from './usageSignals'
 export const APP_BASE=import.meta.env.BASE_URL.replace(/\/$/,'')
 export const BASE=APP_BASE+'/api/v1'
 let csrf=''
 export function setCsrf(token:string){csrf=token}
-export async function api<T=any>(path:string,body?:unknown,method?:string,operationKey?:string):Promise<T>{
+export function sessionCsrf(){return csrf}
+export async function api<T=any>(path:string,body?:unknown,method?:string,operationKey?:string,signal?:AbortSignal):Promise<T>{
   const verb=method || (body===undefined?'GET':'POST')
   const headers:Record<string,string>={'X-CSRF-Token':csrf}
   if(verb!=='GET')headers['Idempotency-Key']=operationKey??crypto.randomUUID()
   if(body!==undefined && !(body instanceof FormData))headers['Content-Type']='application/json'
-  const response=await fetch(BASE+path,{method:verb,credentials:'same-origin',headers,body:body===undefined?undefined:body instanceof FormData?body:JSON.stringify(body)})
+  const failed=requestFailure(path,verb)
+  let response:Response
+  try{
+    response=await fetch(BASE+path,{method:verb,signal,credentials:'same-origin',headers,body:body===undefined?undefined:body instanceof FormData?body:JSON.stringify(body)})
+  }catch(error){if(!signal?.aborted)failed?.('error');throw error}
   const data=await response.json().catch(()=>({}))
   if(!response.ok){
+    if(response.status!==401)failed?.([400,422].includes(response.status)?'validation':'error')
     const detail=data.detail
     let message=typeof detail==='string'?detail:detail?.message || '操作未完成，请稍后重试'
     if(Array.isArray(detail?.issues)&&typeof detail.issues[0]==='string')message+='：'+detail.issues.slice(0,3).join('；')
@@ -17,18 +25,27 @@ export async function api<T=any>(path:string,body?:unknown,method?:string,operat
   }
   return data as T
 }
-export async function waitJob(id:string,onState?:(state:any)=>void){
+export async function waitJob(id:string,onState?:(state:any)=>void,kind:'import'|'export'='import'){
+  const failed=jobFailure(kind)
   for(let i=0;i<300;i++){
     const j=await api('/jobs/'+id);onState?.(j)
-    if(j.state==='FAILED')throw new Error(j.error || '文件处理失败')
-    if(j.state==='DONE')return j
+    if(j.state==='FAILED'){failed?.('error');throw new Error(j.error || '文件处理失败')}
+    if(j.state==='DONE'){
+      if(kind==='import'&&(j.issues_total??j.issues?.length??0)>0)failed?.('validation')
+      return j
+    }
     await new Promise(r=>setTimeout(r,600))
   }
   throw new Error('任务仍在处理中，请稍后重新查看')
 }
 export const completedStates = ['APPROVED','PARTIALLY_APPROVED','REJECTED']
-export const labels:Record<string,string>={DRAFT:'草稿',SUBMITTED:'待复审',IN_REVIEW:'复审中',RETURNED:'已退回',APPROVED:'已通过',PARTIALLY_APPROVED:'部分通过',REJECTED:'不批准',VOID:'已作废',WITHIN:'合理',BELOW:'偏少',ABOVE:'偏多',ERROR:'数据错误',WARNING:'需关注',VALID:'有效',PENDING:'待补数据',MANUAL:'人工判断',EXEMPT:'免数量审核',UNAVAILABLE:'无法计算',NOT_APPLICABLE:'不适用',BATCH_APPROVED:'整批通过',EXCEPTION_APPROVED:'例外批准'}
-export const flagLabels:Record<string,string>={AIR:'需确认空运',COLLISION:'分类重叠',MISSING_RATE:'缺更换率',NO_SEA_RANGE:'仅减海运无法达标',ABC_MISSING:'分类缺失',MANUAL:'市场需求判断'}
+export const labels=localizedLabels({DRAFT:'草稿',SUBMITTED:'待复审',IN_REVIEW:'复审中',RETURNED:'已退回',APPROVED:'已通过',PARTIALLY_APPROVED:'历史结案（旧规则）',REJECTED:'不批准',VOID:'已作废',WITHIN:'合理',BELOW:'偏少',ABOVE:'偏多',ERROR:'数据错误',WARNING:'需关注',VALID:'有效',PENDING:'待补数据',MANUAL:'人工判断',EXEMPT:'免数量审核',UNAVAILABLE:'无法计算',NOT_APPLICABLE:'不适用',BATCH_APPROVED:'整批通过',EXCEPTION_APPROVED:'例外批准'})
+export function planStateLabel(state:string){
+ if(state==='APPROVED')return systemText('整单通过')
+ if(state==='REJECTED')return systemText('整单不批准')
+ return labels[state]||state
+}
+export const flagLabels=localizedLabels({AIR:'需确认空运',COLLISION:'分类重叠',MISSING_RATE:'缺更换率',NO_SEA_RANGE:'仅减海运无法达标',ABC_MISSING:'分类缺失',MANUAL:'市场需求判断'})
 export const reasonLabels=new Map([
   ['市场需求变化','预计用量有变化'],
   ['已确认特殊订单','已有订单要交付'],
@@ -37,8 +54,8 @@ export const reasonLabels=new Map([
   ['数据口径说明','库存或销量需要说明'],
   ['其他','其他原因'],
 ])
-export function reasonLabel(code:string){return reasonLabels.get(code) ?? code}
-export function fmt(v:unknown){if(v===null||v===undefined||v==='')return '—';const n=Number(v);return Number.isFinite(n)?new Intl.NumberFormat('zh-CN',{maximumFractionDigits:3}).format(n):String(v)}
-export function date(v:string){return v?new Date(v).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—'}
+export function reasonLabel(code:string){return reasonLabels.has(code)?systemText(reasonLabels.get(code)!):code}
+export function fmt(v:unknown){if(v===null||v===undefined||v==='')return '—';const n=Number(v);return Number.isFinite(n)?new Intl.NumberFormat(getLanguage(),{maximumFractionDigits:3}).format(n):String(v)}
+export function date(v:string){return v?new Date(v).toLocaleString(getLanguage()==='en'?'en-GB':'zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—'}
 
 export function localDay(v:string){const d=new Date(v);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}

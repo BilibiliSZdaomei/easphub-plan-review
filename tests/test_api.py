@@ -143,5 +143,5 @@ def test_copy_and_void_dont_reuse_approval(clients):
     p,r,a,s=clients;b,v=current(p)
     copied=post(p,'/batches/'+b['id']+'/copy',{});assert copied.status_code==200,copied.text
     new=copied.json();assert new['id']!=b['id'] and new['state']=='DRAFT'
-    assert post(p,'/batches/'+new['id']+'/void',{'revision':new['revision'],'reason':''}).status_code==422
-    assert post(p,'/batches/'+new['id']+'/void',{'revision':new['revision'],'reason':'重复计划'}).status_code==200
+    assert post(p,'/batches/'+new['id']+'/void',{'revision':new['revision'],'reason':'a'*2001}).status_code==422
+    assert post(p,'/batches/'+new['id']+'/void',{'revision':new['revision']}).status_code==200

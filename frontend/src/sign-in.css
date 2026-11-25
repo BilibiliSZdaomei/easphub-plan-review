@@ -93,8 +93,12 @@
   min-width: 0;
   padding: 104px clamp(28px, 4.35vw, 90px);
 }
-.sign-in .sign-in__theme { position: absolute; top: 14px; right: clamp(12px, 1.35vw, 26px); min-height: 44px; }
+.sign-in__tools { position: absolute; top: 14px; right: clamp(12px, 1.35vw, 26px); display: flex; align-items: center; gap: 8px; }
+.sign-in .sign-in__theme { min-height: 44px; }
 .sign-in__form { width: min(100%, 350px); display: grid; gap: 20px; margin: 0; }
+.usage-disclosure { color:var(--ea-secondary); font-size:12px; line-height:1.6; }
+.usage-disclosure summary { cursor:pointer; width:max-content; }
+.usage-disclosure p { margin:5px 0 0; }
 .sign-in__form h2 {
   margin: 0 0 14px;
   color: var(--signin-ink);
@@ -180,7 +184,8 @@
   .sign-in__identity p::before { width: 18px; height: 2px; }
   .sign-in__identity h1 { font-size: clamp(36px, 8vw, 45px); }
   .sign-in__workspace { position: static; padding: clamp(28px, 5.5svh, 50px) clamp(14px, 5vw, 32px) 24px; }
-  .sign-in .sign-in__theme { top: 16px; right: 24px; }
+  .sign-in__tools { top: 16px; right: 24px; }
+  .sign-in__tools .language-switch { background: var(--signin-paper); color: var(--signin-ink); }
   .sign-in__theme .ea-theme-track { background: var(--signin-paper); box-shadow: 0 0 0 1px #ffffff26; }
   .sign-in__form { gap: 18px; }
   .sign-in__form h2 { margin-bottom: 5px; font-size: 28px; }

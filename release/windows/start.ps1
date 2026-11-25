@@ -22,7 +22,10 @@ if ($active) { throw "端口 $port 已被占用。如已启动本应用，请打
 New-Item -ItemType Directory -Path $dataPath -Force | Out-Null
 & (Join-Path $PSScriptRoot 'initialize-desktop.ps1') -DataPath $dataPath -PythonPath $pythonPath
 Write-Host "计划审核  $url"
-Write-Host "首次登录请双击 Admin.cmd。按 Ctrl+C 停止。"
+if (Test-Path -LiteralPath (Join-Path $dataPath 'initial-admin.clixml')) {
+    Write-Host '首次登录信息可在 Admin.cmd 查看。'
+}
+Write-Host '按 Ctrl+C 停止。'
 $runner = Join-Path $PSScriptRoot 'portable-server.py'
 if ($NoBrowser) { & $pythonPath -B $runner --data $dataPath --port $port --no-browser }
 else { & $pythonPath -B $runner --data $dataPath --port $port }

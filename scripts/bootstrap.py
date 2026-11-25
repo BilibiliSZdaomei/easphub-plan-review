@@ -8,6 +8,14 @@ from backend.auth import hasher, valid_password
 from backend.markets import EUROPE, EUROPE_V3_RULE_NAME, LEGACY_DEFAULT, applies_to, register_markets, warehouse_config
 from argon2.exceptions import VerificationError
 
+def add_default_rules(db, admin_id, registered):
+    scopes = {EUROPE if applies_to('DEFAULT', EUROPE, w) else LEGACY_DEFAULT for w in registered}
+    for code in scopes:
+        db.add(Rule(id=uid(),name=EUROPE_V3_RULE_NAME if code==EUROPE else '通用标准 · V3',scope='DEFAULT',scope_code=code,
+                    state='PUBLISHED',active=True,package=default_package(MODEL_V3),note='未来库存＝审核前净额＋海运计划＋空运计划',
+                    creator=admin_id,publisher=admin_id,published_at=now()))
+
+
 def bootstrap(username,name,password,warehouses):
     if not valid_password(password):raise ValueError('初始密码需为 6–200 位')
     if not username.strip() or not name.strip():raise ValueError('请填写账号与姓名')
@@ -15,11 +23,7 @@ def bootstrap(username,name,password,warehouses):
         if db.query(User).first():raise ValueError('数据库已有账号，不能重复初始化，请使用人员管理页面')
         registered, _ = register_markets(db,warehouses)
         admin=User(id=uid(),username=username,name=name,password_hash=hasher.hash(password),roles=['ADMIN'],warehouses=[w.code for w in registered]);db.add(admin)
-        scopes = {EUROPE if applies_to('DEFAULT', EUROPE, w) else LEGACY_DEFAULT for w in registered}
-        for code in scopes:
-            db.add(Rule(id=uid(),name=EUROPE_V3_RULE_NAME if code==EUROPE else '通用标准 · V3',scope='DEFAULT',scope_code=code,
-                        state='PUBLISHED',active=True,package=default_package(MODEL_V3),note='未来库存＝在库数量＋审核前净额＋海运计划',
-                        creator=admin.id,publisher=admin.id,published_at=now()))
+        add_default_rules(db,admin.id,registered)
         audit(db,admin,'初始化正式环境',warehouses=admin.warehouses)
     return {'initialized':True,'admin':username,'warehouses':len(warehouses),'demo_data_created':False}
 
@@ -43,7 +47,7 @@ def extend_markets(username, password, warehouses):
                 legacy=defaults.filter_by(scope_code=LEGACY_DEFAULT,active=True).first()
                 european=Rule(id=uid(),name=EUROPE_V3_RULE_NAME,scope='DEFAULT',scope_code=EUROPE,state='DRAFT',active=False,
                               package=upgrade_to_v3(legacy.package) if legacy else default_package(MODEL_V3),creator=admin.id,
-                              note='欧洲市场共用 V3，未来库存＝在库数量＋审核前净额＋海运计划。')
+                              note='欧洲市场共用 V3，未来库存＝审核前净额＋海运计划＋空运计划。')
                 db.add(european)
                 audit(db,admin,'创建欧洲通用标准草稿',rule_id=european.id)
         if added:

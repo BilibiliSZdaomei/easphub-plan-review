@@ -128,10 +128,18 @@ def smoke(archive, workdir):
                     assert [header_text[column+'1'] for column in 'NOPQRS'] == [month+' 销量' for month in months]
                     assert len(ElementTree.fromstring(xlsx.read('xl/comments/comment1.xml')).findall('.//{*}comment')) == 43
                 assert '物料号' in fetch('api/v1/template?kind=standard').decode('utf-8-sig')
+                with zipfile.ZipFile(BytesIO(fetch('api/v1/template?kind=v3&period=2026-02&lang=en'))) as english:
+                    assert english.testzip() is None
+                    with english.open('xl/worksheets/sheet1.xml') as sheet:
+                        header = next(node for _, node in ElementTree.iterparse(sheet) if node.tag.endswith('}row'))
+                    assert 'Material number' in ''.join(header.itertext())
+                assert len(json.loads(fetch('api/v1/usage/insights?scope=team'))['trend']) == 7
+                assert json.loads(fetch('api/v1/mail-delivery/status'))['smtp_configured'] is False
                 fetch('api/v1/sessions/current',headers={'X-CSRF-Token':session['csrf']},method='DELETE')
                 with sqlite3.connect((data/'plan-review.sqlite3').as_uri()+'?mode=ro',uri=True) as db:
                     assert db.execute('SELECT count(*) FROM users').fetchone()[0] == 1
-                    assert db.execute('SELECT version_num FROM alembic_version').fetchone() == ('0006',)
+                    assert db.execute('SELECT version_num FROM alembic_version').fetchone() == ('0013',)
+                    assert db.execute('SELECT count(*) FROM workflow_mail').fetchone() == (0,)
                     assert db.execute("SELECT json_extract(package,'$.model') FROM rules WHERE active=1").fetchall() == [('V3',)]
             finally:
                 if process.poll() is None:
@@ -149,9 +157,26 @@ def smoke(archive, workdir):
                 time.sleep(.1)
             else:
                 raise RuntimeError('Smoke server did not stop')
+    # Use only the account created by the isolated two-launch test above.
+    recovered = workdir/'restored-workspace'
+    bundle = workdir/'synthetic-accounts.easphub'
+    key = workdir/'synthetic-accounts.key'
+    subprocess.run([str(app/'runtime'/'python.exe'), '-B', str(app/'scripts'/'restore_accounts.py'),
+                    'export', '--sqlite', str(data/'plan-review.sqlite3'), '--bundle', str(bundle),
+                    '--key-file', str(key)], env=env, cwd=app, check=True, capture_output=True)
+    for _ in range(2):
+        subprocess.run([str(shell), '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                        str(app/'scripts'/'restore-accounts.ps1'), '-DataDirectory', str(recovered),
+                        '-Bundle', str(bundle), '-KeyFile', str(key)], env=env, cwd=app, check=True, capture_output=True)
+    def account_rows(directory):
+        with sqlite3.connect((directory/'plan-review.sqlite3').as_uri()+'?mode=ro',uri=True) as conn:
+            return conn.execute('SELECT id, username, password_hash, roles, warehouses FROM users ORDER BY id').fetchall()
+    assert account_rows(data) == account_rows(recovered)
     print(json.dumps({'two_launches': True,'empty_snapshot_list': True,'warehouses':10,'accounts':1,
                       'version':health['version'],'python':json.loads((app/'versions.json').read_text())['python'],
-                      'template_and_assets':'plan,v2,v3,standard','schema':'0006','fresh_rule':'V3','port':port,'size':archive.stat().st_size,
+                      'template_and_assets':'plan,v2,v3,standard,v3-en','schema':'0013','fresh_rule':'V3',
+                      'admin_usage': True,'smtp_status': True,'account_restore':'two imports matched original',
+                      'port':port,'size':archive.stat().st_size,
                       'sha256':sha256(archive.read_bytes()).hexdigest()}))
 
 

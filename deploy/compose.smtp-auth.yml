@@ -1,0 +1,11 @@
+# Add to compose.smtp.yml when the existing SMTP service requires login.
+services:
+  worker:
+    environment:
+      PLAN_REVIEW_SMTP_USER: ${PLAN_REVIEW_SMTP_USER:?Set the SMTP account}
+      PLAN_REVIEW_SMTP_PASSWORD_FILE: /run/secrets/plan_review_smtp_password
+    secrets:
+      - plan_review_smtp_password
+secrets:
+  plan_review_smtp_password:
+    file: ${PLAN_REVIEW_SMTP_PASSWORD_HOST_FILE:?Set an external SMTP password file}

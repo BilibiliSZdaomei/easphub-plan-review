@@ -1,5 +1,14 @@
 """Business warnings shown before a plan is submitted or finalized."""
 from .rules import FLAG_LABELS, fingerprint
+from collections import Counter
+
+
+def approval_status(result):
+    if (result.get('quantity_status') in ('BELOW', 'ABOVE')
+            or result.get('delay_replenishment')
+            or result.get('data_status') in ('ERROR', 'PENDING')):
+        return 'EXCEPTION_APPROVED'
+    return 'APPROVED'
 
 
 def business_warnings(row):
@@ -22,12 +31,23 @@ def business_warnings(row):
 
 def confirmation(rows,stage,revision,all_rows=False):
     affected=[]
+    decisions=Counter()
+    pending_exceptions=0
     for row in rows:
+        status=(row.get('decision') or {}).get('status')
+        decisions[status]+=1
+        if not status and approval_status(row['result'])=='EXCEPTION_APPROVED':
+            pending_exceptions+=1
         issues=business_warnings(row)
         if issues:affected.append({'id':row['id'],'material_code':row['input']['material_code'],'material_name':row['input'].get('material_name',''),'issues':issues,'flags':row['result']['manual_flags'],'data_error':row['result']['data_status']=='ERROR'})
-    return {'stage':stage,'revision':revision,'total':len(rows),'unreviewed':sum(not r.get('decision') for r in rows),'affected_count':len(affected),'issue_count':sum(len(r['issues']) for r in affected),
-            'rejected':sum((r.get('decision') or {}).get('status')=='REJECTED' for r in rows),
-            'return_marked':sum((r.get('decision') or {}).get('status')=='RETURNED' for r in rows),
+    rejected=decisions['REJECTED']+decisions['RETURNED']
+    reviewed_exception=decisions['EXCEPTION_APPROVED']
+    return {'stage':stage,'revision':revision,'total':len(rows),'unreviewed':decisions[None],'affected_count':len(affected),'issue_count':sum(len(r['issues']) for r in affected),
+            'rejected':rejected,'approval_blocked':bool(rejected),
+            'reviewed_approved':decisions['APPROVED']+decisions['BATCH_APPROVED']+reviewed_exception,
+            'reviewed_exception':reviewed_exception,'return_marked':decisions['RETURNED'],
+            'unreviewed_exception':0 if rejected else pending_exceptions,
+            'exception_approved':0 if rejected else reviewed_exception+pending_exceptions,
             'error_rows':sum(r['data_error'] for r in affected),'air_rows':sum('AIR' in r['flags'] for r in affected),
             'rows':affected if all_rows else affected[:100],'truncated':not all_rows and len(affected)>100,
             'issue_hash':fingerprint({'stage':stage,'revision':revision,'rows':affected})}

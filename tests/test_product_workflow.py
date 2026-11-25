@@ -173,7 +173,7 @@ def test_item_lookup_and_notifications_visibility(clients):
     row = version['items'][-1]
     url = P+'/versions/'+version['id']+'/items/'
     assert planner.get(url+row['id']).json() == row
-    assert reviewer.get(url+row['id']).json() == row
+    assert reviewer.get(url+row['id']).status_code == 403
     assert planner.get(url+'missing').status_code == 404
     assert spain.get(url+row['id']).status_code == 403
 
@@ -188,6 +188,10 @@ def test_item_lookup_and_notifications_visibility(clients):
     all_visible = planner.get(P+'/notifications?all=true').json()
     assert len(all_visible) == 105 and all(n['text'].startswith('待办 ') for n in all_visible)
     assert not spain.get(P+'/notifications?all=true').json()
+    assert not reviewer.get(P+'/notifications?all=true').json()
+    submitted=post(planner,'/versions/'+version['id']+'/submit',{'revision':version['revision']})
+    assert submitted.status_code == 200
+    assert reviewer.get(url+row['id']).json()['input'] == row['input']
 
 
 def test_import_empty_and_complete_issue_download(clients):

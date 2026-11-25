@@ -1,0 +1,20 @@
+.people-panel .people-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-block: 12px; }
+.people-panel .people-filters .search { flex: 1 1 200px; max-width: 350px; min-width: 140px; margin: 0; }
+.people-panel .people-filters select { width: auto; max-width: 100%; margin: 0; }
+.people-panel th, .people-panel td { vertical-align: top; }
+.people-panel td:first-child small { overflow-wrap: anywhere; }
+.people-panel .people-warehouses { display: inline-flex; flex-wrap: wrap; gap: 5px 13px; vertical-align: middle; }
+.people-access summary { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 12px; cursor: pointer; }
+.people-access summary::marker, .people-access summary::-webkit-details-marker { display: none; content: ''; }
+.people-access summary:focus-visible { outline: 2px solid var(--ea-action); outline-offset: 2px; }
+.people-access .people-more { display: inline-flex; align-items: center; gap: 3px; color: var(--ea-action); font-size: 12px; white-space: nowrap; }
+.people-access[open] summary svg { transform: rotate(180deg); }
+.people-access[open] > div { margin-top: 8px; }
+.people-panel td:nth-child(3) { width: 42%; }
+.people-panel td:nth-child(4),.people-panel td:last-child { white-space: nowrap; }
+.people-panel td.people-email { white-space: normal; overflow-wrap: anywhere; min-width: 125px; max-width: 220px; }
+@media (max-width:700px) {
+ .people-panel .people-filters .search { flex-basis: 100%; max-width: none; }
+ .people-panel .people-filters select { min-height: 42px; }
+ .people-panel table { min-width: 635px; }
+}

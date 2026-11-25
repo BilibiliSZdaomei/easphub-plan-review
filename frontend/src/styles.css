@@ -861,14 +861,13 @@ td small span, .plan-table .material-col small span { color: var(--ea-muted); }
 
 .review-outcomes { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
 .review-outcomes legend { color: var(--ea-secondary); margin-bottom: 8px; font-weight: 600; }
-.review-outcomes > div { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; }
+.review-outcomes > div { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; }
 .review-form .review-outcomes label { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 0; min-height: 36px; color: var(--ea-secondary); background: var(--ea-subtle); border: 1px solid var(--ea-border); border-radius: 8px; cursor: pointer; }
 .review-form .review-outcomes input { width: 13px; height: 13px; min-height: 0; margin: 0; accent-color: var(--ea-action); }
 .review-form .review-outcomes .chosen { color: var(--ea-action); background: var(--ea-selection); border-color: var(--ea-action); }
 .decision-box.rejected, .badge.rejected { color: var(--ea-danger); background: var(--ea-danger-soft); }
 .decision-box.returned, .badge.partially_approved { color: var(--ea-warning); background: var(--ea-warning-soft); }
 .plan-table .decision-reason { display: block; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ea-secondary); }
-@media(max-width: 450px){.review-outcomes > div { grid-template-columns: repeat(2,minmax(0,1fr)); }}
 .reuse-data { margin: 12px 0; }
 .reuse-data > summary, .plan-reference summary { cursor: pointer; color: var(--soft); }
 .reuse-data[open] > summary { margin-bottom: 10px; }
@@ -938,3 +937,8 @@ td small span, .plan-table .material-col small span { color: var(--ea-muted); }
   .app-shell { --sidebar-duration: 0s; }
   .app-shell .main-nav, .sidebar-resize::after { transition: none; }
 }
+
+.language-switch { display:inline-flex; align-items:center; justify-content:center; gap:6px; flex-shrink:0; min-height:32px; padding:4px 10px; border:1px solid var(--line,#d1d5db); border-radius:18px; background:transparent; color:inherit; font:inherit; font-size:13px; font-weight:550; cursor:pointer }
+.language-switch:hover { background:rgba(120,130,145,.12) }
+.language-switch:focus-visible { outline:2px solid #427aca; outline-offset:2px }
+:lang(en) .stats-strip em { margin-inline-start:.35em }

@@ -1,3 +1,4 @@
+import mimetypes
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime
@@ -11,18 +12,22 @@ from fastapi.responses import RedirectResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy import select, delete, text, func
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.exc import IntegrityError
 from .db import *
 from .auth import login, public_user, authenticate, hash_token, role, scope, password_change
+from .personas import SOURCE as AVATAR_SOURCE, REVISION as AVATAR_REVISION, PresetChoice, CustomChoice
 from .api_common import context, once
 from .roles import has_role
 from .demo import seed_demo
 from .jobs import start_workers, FILES
-from .governance import effective_input, apply_governance
+from .governance import apply_governance
 from . import services as svc
-from .table_query import query_items, display_row, column_options, COLUMNS
-from .exceptions import confirmation
+from .table_query import query_items, table_item, COLUMNS
+from .adapters import MAX_ROWS
+from .exceptions import approval_status, confirmation
 from .settings import BASE_PATH, API_PREFIX, DEPLOY_ENV
 from .health import readiness, UI_DIR
 from .markets import EUROPE, MARKET_NAMES, market_key
@@ -41,7 +46,7 @@ async def lifespan(app):
         workers[0].set()
         for t in workers[1]:t.join(timeout=2)
 
-app=FastAPI(title='计划审核',version='2.2.0',lifespan=lifespan,docs_url=BASE_PATH+'/api/docs' if DEPLOY_ENV=='local' else None,openapi_url=BASE_PATH+'/api/openapi.json',redoc_url=None)
+app=FastAPI(title='计划审核',version='2.3.0',lifespan=lifespan,docs_url=BASE_PATH+'/api/docs' if DEPLOY_ENV=='local' else None,openapi_url=BASE_PATH+'/api/openapi.json',redoc_url=None)
 PREFIX=API_PREFIX
 
 @app.middleware('http')
@@ -88,7 +93,7 @@ async def business_error(request,exc):
 @app.get(PREFIX+'/health')
 def health():
     ready=readiness()
-    return JSONResponse({'status':'ok' if ready else 'not_ready','app':'plan-review','version':'2.2.0','demo':DEMO,'database':engine.dialect.name},status_code=200 if ready else 503)
+    return JSONResponse({'status':'ok' if ready else 'not_ready','app':'plan-review','version':'2.3.0','demo':DEMO,'database':engine.dialect.name},status_code=200 if ready else 503)
 
 @app.get('/health/live')
 def health_live():return {'status':'ok','app':'plan-review'}
@@ -133,6 +138,27 @@ def me(request:Request,ctx=Depends(context,scope="function")):
     db,user=ctx;_,session=authenticate(db,request)
     return {'user':public_user(user),'csrf':session.csrf,'demo':DEMO}
 
+@app.patch(PREFIX+'/profile/avatar')
+def update_avatar(choice:PresetChoice|CustomChoice,ctx=Depends(context,scope="function")):
+    db,user=ctx
+    if isinstance(choice,PresetChoice) and choice.avatar_preset=='blank':
+        db.execute(delete(UserAvatar).where(UserAvatar.user_id==user.id))
+        db.expire(user,['avatar'])
+        return public_user(user)
+    if isinstance(choice,CustomChoice):
+        preset,config='plan',choice.avatar_config.model_dump()
+    else:
+        preset,config=choice.avatar_preset,None
+    values={'preset':preset,'source':AVATAR_SOURCE,'revision':AVATAR_REVISION,'config':config}
+    # A single upsert keeps simultaneous first saves from creating duplicate preferences.
+    if db.get_bind().dialect.name=='mysql':
+        statement=mysql_insert(UserAvatar).values(user_id=user.id,**values).on_duplicate_key_update(**values)
+    else:
+        statement=sqlite_insert(UserAvatar).values(user_id=user.id,**values).on_conflict_do_update(
+            index_elements=[UserAvatar.user_id],set_=values)
+    db.execute(statement)
+    return public_user(user)
+
 @app.delete(PREFIX+'/sessions/current')
 def logout(request:Request,response:Response,ctx=Depends(context,scope="function")):
     db,user=ctx;db.execute(delete(LoginSession).where(LoginSession.token_hash==hash_token(request.cookies.get('plan_session',''))))
@@ -151,12 +177,13 @@ def warehouses(ctx=Depends(context,scope="function")):
 @app.get(PREFIX+'/batches')
 def batches(ctx=Depends(context,scope="function")):
     db,user=ctx
-    return [svc.batch_json(db,b) for b in db.scalars(select(Batch).where(Batch.warehouse.in_(user.warehouses)).order_by(Batch.updated_at.desc()))]
+    return [svc.batch_json(db,b) for b in db.scalars(select(Batch).where(svc.visible_batch_filter(db,user)).order_by(Batch.updated_at.desc()))]
 
 @app.post(PREFIX+'/batches')
 def create_batch(data:dict,request:Request,ctx=Depends(context,scope="function")):
     db,user=ctx
-    return once(db,user,request,data,lambda:svc.batch_json(db,svc.new_batch(db,user,data)))
+    return once(db,user,request,data,lambda:svc.batch_json(db,svc.new_batch(db,user,data)),
+                on_replay=lambda:scope(user,data.get('warehouse')))
 
 @app.get(PREFIX+'/batches/{batch_id}')
 def get_batch(batch_id:str,include_events:bool=True,ctx=Depends(context,scope="function")):
@@ -184,7 +211,9 @@ def version_activity(version_id:str,page:int=1,ctx=Depends(context,scope="functi
     items=[]
     for event,actor in db.execute(events):
         detail=event.detail or {}
-        record={key:detail[key] for key in ('reason','decision','rows','count','approved','rejected','batch_approved','warning_rows','filtered','source_number','source_seq','material_codes','reviewer_name','from_reviewer_name') if key in detail}
+        record={key:detail[key] for key in ('operation','reason','decision','rows','count','outcome','approved','rejected',
+                'reviewed_approved','reviewed_rejected','reviewed_exception','unreviewed','batch_approved','exception_approved',
+                'warning_rows','filtered','source_number','source_seq','material_codes','reviewer_name','from_reviewer_name') if key in detail}
         if 'changes' in detail:record['count']=len(detail['changes'])
         if 'ids' in detail:record['selected_count']=len(detail['ids'])
         if detail.get('override'):record['reason']=detail['override'].get('reason')
@@ -192,18 +221,20 @@ def version_activity(version_id:str,page:int=1,ctx=Depends(context,scope="functi
     return {'items':items,'total':total,'page':page,'page_size':size}
 
 @app.get(PREFIX+'/versions/{version_id}')
-def get_version(version_id:str,q:str='',filter:str='all',page:int=1,page_size:int=30,column_filters:str='{}',sort_key:str='',sort_direction:str='asc',include_batch_context:bool=False,ctx=Depends(context,scope="function")):
+def get_version(version_id:str,q:str='',filter:str='all',page:int=1,page_size:int=30,column_filters:str='{}',sort_key:str='',sort_direction:str='asc',include_batch_context:bool=False,table_view:bool=False,ctx=Depends(context,scope="function")):
     db,user=ctx;batch,ver=svc.version_access(db,user,version_id,lock=False)
-    rows=query_items(ver.items,q,filter,column_filters,sort_key,sort_direction,reviewing=has_role(user,'REVIEWER') and ver.state in ('SUBMITTED','IN_REVIEW'),version_state=ver.state)
-    page_size=max(1,min(page_size,100));page=max(page,1)
+    facets={key:set() for key,_,kind in COLUMNS if kind=='enum'}
+    rows=query_items(ver.items,q,filter,column_filters,sort_key,sort_direction,reviewing=has_role(user,'REVIEWER') and ver.state in ('SUBMITTED','IN_REVIEW'),version_state=ver.state,facets=facets)
+    page_size=max(1,min(page_size,MAX_ROWS));page=max(page,1)
     rule=db.get(Rule,ver.rule_id);snap=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None;latest_rule=svc.active_rule(db,batch.warehouse)
     return {'id':ver.id,'seq':ver.seq,'revision':ver.revision,'state':ver.state,'batch_id':batch.id,'owner':batch.owner,
             **svc.assignment(db,batch,ver),
+            **svc.plan_undo.hints(db,user,batch,ver),
             **({'batch_current_id':batch.current_id,'batch_state':batch.state,'batch_updated_at':batch.updated_at} if include_batch_context else {}),
-            'items':[{**r,'input':effective_input(r),'table_values':display_row(r,ver.state)} for r in rows[(page-1)*page_size:page*page_size]],'total':len(rows),'summary':svc.summary(ver.items),
-            'columns':[{'key':k,'label':label,'type':t} for k,label,t in COLUMNS],'column_options':column_options(ver.items,ver.state),
+            'items':[table_item(r,ver.state,table_view,rule.package) for r in rows[(page-1)*page_size:page*page_size]],'total':len(rows),'summary':svc.summary(ver.items),
+            'columns':[{'key':k,'label':label,'type':t} for k,label,t in COLUMNS],'column_options':{key:sorted(values) for key,values in facets.items()},
             'page':page,'page_size':page_size,'snapshot':{'id':snap.id,'name':snap.name,'as_of':snap.as_of,'basis':snap.basis,'net_mode':snap.net_mode} if snap else None,
-            'rule':{'id':rule.id,'name':rule.name,'published_at':rule.published_at,'params':rule.package['params'],'model':rule.package.get('model','0804'),'has_material_basis':bool(rule.package.get('master_data') or rule.package.get('target_policy'))},
+            'rule':{'id':rule.id,'name':rule.name,'published_at':rule.published_at,'params':rule.package['params'],'model':rule.package.get('model','0804'),'v3_revision':rule.package.get('v3_revision'),'has_material_basis':bool(rule.package.get('master_data') or rule.package.get('target_policy'))},
             'latest_rule_id':latest_rule.id,'latest_rule_name':latest_rule.name}
 
 def filter_items(items,q='',filter='all'):
@@ -223,12 +254,20 @@ def get_version_item(version_id:str,row_id:str,ctx=Depends(context,scope="functi
     _,version=svc.version_access(db,user,version_id,lock=False)
     row=next((item for item in version.items if item['id']==row_id),None)
     svc.demand(row is not None,'本版本没有这条计划行',404)
-    return {**row,'input':effective_input(row),'table_values':display_row(row,version.state)}
+    return table_item(row,version.state,package=db.get(Rule,version.rule_id).package)
 
 @app.get(PREFIX+'/versions/{version_id}/selection')
 def select_rows(version_id:str,q:str='',filter:str='all',column_filters:str='{}',sort_key:str='',sort_direction:str='asc',ctx=Depends(context,scope="function")):
     db,user=ctx;batch,ver=svc.version_access(db,user,version_id,lock=False)
     return {'ids':[r['id'] for r in query_items(ver.items,q,filter,column_filters,sort_key,sort_direction,reviewing=has_role(user,'REVIEWER') and ver.state in ('SUBMITTED','IN_REVIEW'),version_state=ver.state)]}
+
+@app.post(PREFIX+'/versions/{version_id}/issue-preview')
+def preview_draft_issues(version_id:str,data:dict,ctx=Depends(context,scope="function")):
+    from .plan_issues import issue_preview
+    db,user=ctx
+    batch,version=svc.version_access(db,user,version_id,lock=False)
+    svc.editable(user,batch,version,data.get('revision'))
+    return issue_preview(version,db.get(Rule,version.rule_id),data.get('edits',{}),data.get('group','all'),data.get('page',1))
 
 @app.get(PREFIX+'/versions/{version_id}/confirmation')
 def get_confirmation(version_id:str,stage:str='submit',all:bool=False,ctx=Depends(context,scope="function")):
@@ -240,7 +279,9 @@ def get_confirmation(version_id:str,stage:str='submit',all:bool=False,ctx=Depend
         svc.demand(ver.state in ('SUBMITTED','IN_REVIEW'),'当前版本不在复审中',409)
     rows=ver.items
     if stage=='submit':
-        rule=db.get(Rule,ver.rule_id);rows=[{**r,'result':svc.plan_result(r['input'],rule,ver.snapshot_id)} for r in rows]
+        rule=db.get(Rule,ver.rule_id)
+        svc.check_submission_inputs(rows, rule.package)
+        rows=[{**r,'result':svc.plan_result(r['input'],rule,ver.snapshot_id)} for r in rows]
     return confirmation(rows,stage,ver.revision,all_rows=all)
 
 @app.patch(PREFIX+'/versions/{version_id}/items')
@@ -253,7 +294,9 @@ def review_summary(version_id:str,data:dict,ctx=Depends(context,scope="function"
     ids=set(data.get('ids',[]));svc.demand(ids and ids<={r['id'] for r in ver.items},'请选择当前版本的记录')
     selected=[r for r in ver.items if r['id'] in ids]
     rows=[r for r in selected if not r.get('decision')] if data.get('only_pending') is True else selected
-    summary={'flags':sorted({flag for r in rows for flag in r['result']['manual_flags']}),'exception':any(r['result']['quantity_status'] in ('ABOVE','BELOW') for r in rows),'count':len(rows)}
+    exceptions=sum(approval_status(r['result'])=='EXCEPTION_APPROVED' for r in rows)
+    summary={'flags':sorted({flag for r in rows for flag in r['result']['manual_flags']}),'exception':bool(exceptions),
+             'exception_count':exceptions,'count':len(rows)}
     if data.get('only_pending') is True:
         summary.update(preserved=len(selected)-len(rows), errors=sum(r['result']['data_status']=='ERROR' for r in rows),
                        delayed=sum(r['result'].get('delay_replenishment') is True for r in rows))
@@ -287,9 +330,15 @@ def preview_snapshot(version_id:str,data:dict,ctx=Depends(context,scope="functio
 def action_route(action):
     def endpoint(version_id:str,data:dict,request:Request,ctx=Depends(context,scope="function")):
         db,user=ctx
-        return once(db,user,request,data,lambda:action(db,user,version_id,data))
+        def perform():
+            result = action(db,user,version_id,data)
+            if action in (svc.submit,svc.claim,svc.transfer,svc.finalize,svc.return_batch):
+                svc.plan_undo.forget(db,version_id)
+            return result
+        return once(db,user,request,data,perform,replay_conflicts=action in (svc.plan_undo.undo,svc.plan_undo.redo),
+                    on_replay=lambda:svc.version_access(db,user,version_id,lock=False))
     return endpoint
-for name,fn in [('submit',svc.submit),('claim',svc.claim),('transfer',svc.transfer),('reviews',svc.review),('finalize',svc.finalize),('return',svc.return_batch)]:
+for name,fn in [('undo',svc.plan_undo.undo),('redo',svc.plan_undo.redo),('submit',svc.submit),('claim',svc.claim),('transfer',svc.transfer),('reviews',svc.review),('finalize',svc.finalize),('return',svc.return_batch)]:
     app.add_api_route(PREFIX+'/versions/{version_id}/'+name,action_route(fn),methods=['POST'])
 
 @app.post(PREFIX+'/batches/{batch_id}/copy')
@@ -316,19 +365,36 @@ def copy_batch(batch_id:str,data:dict,request:Request,ctx=Depends(context,scope=
 def void_batch(batch_id:str,data:dict,request:Request,ctx=Depends(context,scope="function")):
     db,user=ctx;batch=svc.batch_access(db,user,batch_id);ver=db.get(Version,batch.current_id)
     def do_void():
-        svc.editable(user,batch,ver,data.get('revision'));svc.demand(data.get('reason'),'请填写作废原因')
-        batch.state='VOID';ver.state='VOID';audit(db,user,'作废计划',batch.warehouse,batch.id,ver.id,reason=data['reason'])
+        svc.editable(user,batch,ver,data.get('revision'))
+        reason=str(data.get('reason') or '').strip()
+        svc.demand(len(reason)<=2000,'作废备注最多2000字')
+        svc.plan_undo.forget(db,ver.id)
+        batch.state='VOID';ver.state='VOID';batch.updated_at=now();audit(db,user,'作废计划',batch.warehouse,batch.id,ver.id,reason=reason)
         return {'state':'VOID'}
     return once(db,user,request,data,do_void)
 
 @app.get(PREFIX+'/notifications')
 def notifications(all:bool=False,ctx=Depends(context,scope="function")):
+    from .notification_inbox import accessible, display_notice
     db,user=ctx
-    query=select(Notification).where(Notification.user_id==user.id,Notification.warehouse.in_(user.warehouses)).order_by(Notification.created_at.desc(),Notification.id.desc())
-    return [{'id':n.id,'batch_id':n.batch_id,'text':n.text,'seen':n.seen,'at':n.created_at} for n in db.scalars(query if all else query.limit(100))]
+    query=select(Notification,Batch.state).join(Batch,Batch.id==Notification.batch_id).where(*accessible(db,user)).order_by(Notification.created_at.desc(),Notification.id.desc())
+    return [{'id':n.id,'batch_id':n.batch_id,'text':display_notice(n.text,n.kind,state),'seen':n.seen,'at':n.created_at} for n,state in db.execute(query if all else query.limit(100))]
+
+@app.get(PREFIX+'/notification-inbox')
+def notification_inbox(tab:str='all',warehouse:str='',kind:str='',page:int=1,size:int=20,ctx=Depends(context,scope="function")):
+    from .notification_inbox import inbox
+    svc.demand(1<=size<=100,'通知页大小无效')
+    return inbox(*ctx,tab,warehouse,kind,page,size)
+
+@app.post(PREFIX+'/notification-inbox/seen')
+def mark_filtered_notifications(data:dict,ctx=Depends(context,scope="function")):
+    from .notification_inbox import mark_filtered
+    return mark_filtered(*ctx,data.get('tab','all'),data.get('warehouse',''),data.get('kind',''),data.get('before'))
+
 @app.post(PREFIX+'/notifications/{note_id}/seen')
 def mark_seen(note_id:str,ctx=Depends(context,scope="function")):
-    db,user=ctx;n=db.get(Notification,note_id);svc.demand(n is not None and n.user_id==user.id,'待办不存在',404);scope(user,n.warehouse);n.seen=True;return {'ok':True}
+    from .notification_inbox import mark
+    return mark(*ctx,note_id)
 
 @app.get(PREFIX+'/versions/{version_id}/diff')
 def diff_versions(version_id:str,against:str,ctx=Depends(context,scope="function")):
@@ -341,13 +407,19 @@ def diff_versions(version_id:str,against:str,ctx=Depends(context,scope="function
 
 from .routes_data import router as data_router
 from .routes_rules import router as rules_router
+from .usage import router as usage_router
+from .mail_delivery import router as mail_router
 app.include_router(data_router,prefix=PREFIX);app.include_router(rules_router,prefix=PREFIX)
+app.include_router(usage_router,prefix=PREFIX)
+app.include_router(mail_router,prefix=PREFIX)
 
 @app.get('/')
 @app.get(BASE_PATH)
 def root(request:Request):
     query=request.scope.get('query_string',b'').decode('latin-1')
     return RedirectResponse(BASE_PATH+'/'+('?' + query if query else ''),status_code=307)
+# Windows may register .svg as image/svg, which browsers reject with nosniff.
+mimetypes.add_type('image/svg+xml', '.svg')
 dist=UI_DIR
 if (dist/'assets').exists():app.mount(BASE_PATH+'/assets',StaticFiles(directory=dist/'assets'),name='assets')
 @app.get(BASE_PATH+'/favicon.svg')

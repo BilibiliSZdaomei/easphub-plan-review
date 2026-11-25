@@ -3,7 +3,7 @@ from io import BytesIO
 import pytest
 from openpyxl import load_workbook
 
-from backend.db import SessionLocal, User, Version
+from backend.db import SessionLocal, User, Version, Snapshot
 from sqlalchemy import select
 from backend.exporting import export_workbook
 from backend.governance import apply_governance, effective_input
@@ -40,14 +40,14 @@ def test_sku_policy_uses_approved_rate_and_keeps_sources_and_live_export():
     assert item['replacement_target']=='850'
     export=export_workbook({'items':rows,'rule_package':pkg,'metadata':{}})
     with_formulas=load_workbook(BytesIO(export))
-    sheet=with_formulas.worksheets[0]
+    sheet=with_formulas["计划审核结果"]
     assert 'ROUNDUP(AK2*AD2*' in sheet['T2'].value and 'ROUNDUP(AG2*' in sheet['U2'].value
     assert sheet['AK2'].data_type=='f' and with_formulas['计算依据']['AF2'].value==0.0015
-    assert sheet['T3'].data_type=='n' and sheet['T3'].value==850
+    assert with_formulas.active['AA3'].data_type=='n' and with_formulas.active['AA3'].value==850
     assert sheet['T4'].data_type=='f' and with_formulas['计算依据']['AD4'].value==47
     with_formulas.close()
     cached=load_workbook(BytesIO(export),data_only=True)
-    assert [[cached.worksheets[0][f'{col}{n}'].value for col in 'TU'] for n in (2,3,4)]==[[71,10],[850,5],[47,32]]
+    assert [[cached["计划审核结果"][f'{col}{n}'].value for col in 'TU'] for n in (2,3,4)]==[[71,10],[850,5],[47,32]]
     assert cached['计算依据']['A2'].value=='M1' and cached['计算依据']['A3'].value=='OTHER'
     cached.close()
     record=pkg['master_data']['items']['M1']
@@ -80,9 +80,9 @@ def test_master_import_treats_blank_zero_and_duplicates_separately():
 def test_role_scope_publish_and_recalculate_existing_plan_without_snapshot(clients):
     planner,reviewer,admin,_=clients
     with SessionLocal.begin() as db:
-        reviewer_account=db.scalar(select(User).where(User.username=='test_reviewer'))
-        reviewer_account.roles=['REVIEWER']
-        reviewer_account.warehouses=['UK_MAIN']
+        review_account=db.scalar(select(User).where(User.username=='test_reviewer'))
+        review_account.roles=['REVIEWER']
+        review_account.warehouses=['UK_MAIN']
         db.scalar(select(User).where(User.username=='test_steward')).roles=['ADMIN']
     def preview(c,wh='UK_MAIN'):
         return c.post(P+'/rules/master-preview',data={'warehouse':wh},
@@ -94,10 +94,13 @@ def test_role_scope_publish_and_recalculate_existing_plan_without_snapshot(clien
     assert planner.get(P+'/rules/master-template').status_code==403
     assert '更换率' in reviewer.get(P+'/rules/master-template').content.decode('utf-8-sig')
     batch,old=current(planner)
+    with SessionLocal.begin() as db:
+        source_snapshot=db.get(Snapshot,old['snapshot']['id'])
+        source_snapshot.items=[{**item,'current_sales':'3','shortage_qty':'0'} for item in source_snapshot.items]
     draft_plan=ok(post(planner,'/batches',{'warehouse':'UK_MAIN','title':'无快照重算','period':'2026-11'}))
     path='/versions/'+draft_plan['current_id']
     source={'material_code':'M1','material_name':'当期说明','sea_plan_qty':'3','air_plan_qty':'0',
-            'reference':{'monthly_sales':[1,1,1,2,2,2],'fleet_qty':'5900','on_hand_qty':'8','net_supply_before_plan':'2',
+        'reference':{'current_sales':3,'shortage_qty':0,'monthly_sales':[1,1,1,2,2,2],'fleet_qty':'5900','on_hand_qty':'8','net_supply_before_plan':'2',
                          'replacement_target':'850','sales_target':'810','replacement_rate':'0.99'}}
     ok(post(planner,path+'/items',{'revision':ok(planner.get(P+path))['revision'],'items':[source]}))
     before=ok(planner.get(P+path))

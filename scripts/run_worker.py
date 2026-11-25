@@ -16,13 +16,14 @@ def main():
     init_db()
     heartbeat = Path(os.environ.get('PLAN_REVIEW_HEARTBEAT_FILE', '/tmp/plan-review-worker.json'))
     stop, threads = start_workers()
+    job_threads = [thread for thread in threads if thread.name != 'workflow-smtp']
     for number in (signal.SIGTERM, signal.SIGINT):
         signal.signal(number, lambda *_: stop.set())
     try:
         while not stop.is_set():
             payload = {'pid': os.getpid(), 'written_at': time.time(), 'workers': [
                 {'alive': thread.is_alive(), 'progress': WORKER_PROGRESS.get(thread.ident, 0)}
-                for thread in threads]}
+                for thread in job_threads]}
             temporary = heartbeat.with_suffix('.tmp')
             temporary.write_text(json.dumps(payload), encoding='utf-8')
             temporary.replace(heartbeat)

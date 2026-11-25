@@ -1,0 +1,49 @@
+body:has(.plan-view.is-focused) { overflow: hidden; }
+.app-shell:has(.plan-view.is-focused) > :is(.ea-topbar,.main-nav,.sidebar-resize,.ea-nav-backdrop,footer) { display:none; }
+.app-shell .main-content:has(.plan-view.is-focused) {
+ position:fixed; inset:0; margin:0; padding:0; height:100dvh; min-height:0; overflow:hidden;
+ background:var(--ea-base); transition:none;
+}
+.main-content:has(.plan-view.is-focused)::before { display:none; }
+.plan-view.is-focused { display:flex; flex-direction:column; height:100%; min-width:0; overflow:hidden; }
+.plan-view.is-focused > :is(.back-link,.plan-heading,.stepper,.basis-line,.history-panel,.plan-bottom-note) { display:none; }
+.plan-view.is-focused > :is(.notice,.historical-context,.issue-list) {
+ flex:none; margin:0; border-radius:0; max-height:16dvh; overflow:auto;
+}
+.plan-view.is-focused .plan-table-panel {
+ display:flex; flex-direction:column; flex:1 1 0; min-height:0; min-width:0;
+ margin:0; border:0; border-radius:0; box-shadow:none;
+}
+.is-focused .plan-table-header { padding:8px 16px; flex:none; }
+.is-focused .plan-table-header h2 {
+ min-width:0; max-width:clamp(120px,27vw,480px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.is-focused .plan-table-header .actions { gap:6px; }
+.is-focused .plan-table-panel .filter-tabs { margin:6px 16px; flex:none; }
+.is-focused .plan-table-panel .list-toolbar { padding:4px 16px 8px; flex:none; }
+.is-focused .plan-table-panel .plan-scroll { flex:1 1 auto; min-height:0; max-height:none; overflow:auto; border-radius:0; }
+.is-focused .plan-table-panel:has(.filtered-empty) .plan-scroll { flex:0 1 auto; }
+.is-focused .plan-table-panel .filtered-empty { flex:1 1 auto; }
+.is-focused .plan-table-panel .table-footer { flex:none; padding:5px 16px; }
+.plan-view.is-focused .save-bar {
+ position:static; flex:none; margin:0; padding:8px 16px; width:100%; max-width:none; transform:none; border-radius:0;
+}
+.plan-focus-toggle,.plan-native-full { white-space:nowrap; }
+.is-focused .plan-version-label { white-space:nowrap; }
+@media(max-width:760px) {
+ .is-focused .plan-table-header { padding:7px 10px; gap:5px; }
+ .is-focused .plan-table-header h2 { max-width:45vw; }
+ .is-focused .plan-table-header .actions { gap:4px; flex-wrap:wrap; }
+ .is-focused .plan-table-header .plan-version-label { display:none; }
+ .is-focused .plan-table-panel .filter-tabs { margin:4px 10px; }
+ .is-focused .plan-table-panel .list-toolbar { padding:3px 10px; }
+ .is-focused .plan-table-panel .table-footer { padding:3px 10px; gap:5px; }
+}
+@media(max-height:510px) {
+ .is-focused .plan-table-header { padding-block:3px; }
+ .is-focused .plan-table-panel .list-toolbar,.is-focused .plan-table-panel .table-footer { padding-block:2px; }
+ .is-focused .plan-table-panel .filter-tabs { margin-block:2px; }
+}
+
+.plan-table-panel .plan-native-full { min-height:32px; min-width:32px; justify-content:center; }
+@media(max-width:900px) { .plan-native-full span { display:none; } }

@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.properties import CalcProperties
-from .rules import number, default_package, FLAG_LABELS, PARAM_LABELS, MODEL_V2, MODEL_V3, REASON_LABELS
+from .rules import number, default_package, corrected_v3, FLAG_LABELS, PARAM_LABELS, MODEL_V2, MODEL_V3, REASON_LABELS
 from .table_query import decision_label
 from .governance import effective_input
 
@@ -139,16 +139,52 @@ def write_v3_row_inputs(ws, calc, row, item, result, formula, ranges, net_mode):
                 int(override == key if override else hit))
 
 
-def export_workbook(payload):
+APPROVALS = frozenset(('APPROVED','EXCEPTION_APPROVED','BATCH_APPROVED'))
+EXECUTION_FORMAT = 1
+EXECUTION_COLUMNS = [('plan_outcome','整单结论'),('executable_sea','本版可执行海运量'),('executable_air','本版可执行空运量')]
+ARCHIVE_COLUMNS = [('historical_sea','历史核准海运量（旧规则）'),('historical_air','历史核准空运量（旧规则）')]
+
+
+def execution_basis(state, rows, current):
+    """Use the complete version before selecting any visible output rows."""
+    statuses = [(row.get('decision') or {}).get('status') for row in rows]
+    all_approved = bool(statuses) and all(status in APPROVALS for status in statuses)
+    approved = state=='APPROVED' and all_approved and current
+    label = {'DRAFT':'草稿','SUBMITTED':'待复审','IN_REVIEW':'复审中','RETURNED':'整单退回','VOID':'已作废',
+             'APPROVED':'整单通过','REJECTED':'整单不批准','PARTIALLY_APPROVED':'历史结案（旧规则）'}.get(state,'待核实')
+    if state=='APPROVED' and not approved:
+        label = '历史版本（整单通过）' if not current else '整单记录待核'
+    return {'state':state,'current':current,'total':len(statuses),'has_review':any(statuses),'executable':approved,'label':label}
+
+
+def old_export_requires_refresh(payload, result, full_version=None):
+    if result.get('execution_format')==EXECUTION_FORMAT:
+        return False
+    state = (payload.get('metadata') or {}).get('版本状态')
+    if state=='PARTIALLY_APPROVED':
+        return True
+    if state=='APPROVED':
+        rows=full_version.items if full_version else payload.get('items',[])
+        return any((row.get('decision') or {}).get('status') in ('REJECTED','RETURNED') for row in rows)
+    # In the old format REJECTED could carry signed positive quantities on approved rows.
+    return state=='REJECTED' and any((row.get('decision') or {}).get('status') in APPROVALS and
+        any((n(row['input'].get(k)) or 0)>0 for k in ('sea_plan_qty','air_plan_qty'))
+        for row in payload.get('items',[]))
+
+
+def export_workbook(payload, files=None):
     package=payload.get('rule_package')
     if not package:
         raw=payload.get('metadata',{}).get('规则参数')
         results = [row['result'] for row in payload['items']]
         model = MODEL_V3 if any('turnover_warning' in r for r in results) else MODEL_V2 if any('advice' in r for r in results) else '0804'
         package=json.loads(raw) if raw else default_package(model)
+        if not raw and model == MODEL_V3 and not any(r.get('v3_revision') for r in results):
+            package.pop('v3_revision', None)  # Historical export jobs predate rule-package capture.
     wb=Workbook();ws=wb.active;ws.title='计划审核结果';meta=wb.create_sheet('版本与来源');params=wb.create_sheet('规则参数');calc=wb.create_sheet('计算依据')
     wb.calculation=CalcProperties(calcMode='auto',fullCalcOnLoad=True,forceFullCalc=True)
     v3 = package.get('model') == MODEL_V3
+    current_v3 = corrected_v3(package)
     v2 = package.get('model') in (MODEL_V2, MODEL_V3)
     columns = COLS
     if v2:
@@ -157,8 +193,23 @@ def export_workbook(payload):
     if v3:
         columns += [('future_fleet_qty','未来装车量'), ('turnover_warning','周转预警（公式）')]
     metadata = payload.get('metadata',{})
-    if metadata.get('复审负责人') or metadata.get('版本状态') in ('APPROVED','REJECTED','PARTIALLY_APPROVED') or any(row.get('return_reason') for row in payload['items']):
-        columns = [*columns, ('approved_sea','终审核准海运量'), ('approved_air','终审核准空运量'), ('return_reason','上轮退回原因')]
+    state = metadata.get('版本状态')
+    basis = payload.get('execution')
+    if not basis:
+        # Jobs queued before this format have no proof of their complete, current version.
+        basis = execution_basis(state,[],False)
+        if state=='APPROVED':
+            basis['label']='归档导出（整单通过，执行量待核）'
+    if metadata.get('复审负责人') or state in ('IN_REVIEW','APPROVED','REJECTED','PARTIALLY_APPROVED','RETURNED') or any(row.get('return_reason') for row in payload['items']):
+        columns = [*columns, ('return_reason','上轮退回原因')]
+    reviewed_draft = state=='DRAFT' and (basis['has_review'] or any(row.get('return_requested') for row in payload['items']))
+    if reviewed_draft or state in ('SUBMITTED','IN_REVIEW','APPROVED','REJECTED','PARTIALLY_APPROVED','RETURNED','VOID'):
+        columns = [*columns, *EXECUTION_COLUMNS]
+    if state=='PARTIALLY_APPROVED':
+        columns = [*columns, *ARCHIVE_COLUMNS]
+    if current_v3:
+        columns += [('current_sales','当月销量（必填）'),('shortage_qty','缺货数量（必填）')]
+    column_letters = {key:get_column_letter(index) for index,(key,_) in enumerate(columns,1)}
     ws.append([label for _,label in columns]);params.append(['参数','值','字段'])
     param_refs={}
     for key,value in package['params'].items():
@@ -174,22 +225,25 @@ def export_workbook(payload):
     for idx,row in enumerate(payload['items'],2):
         i=effective_input(row);r=row['result'];d=row.get('decision') or {};o=row.get('submission_override') or {}
         defaults = {} if r.get('basis_pending') else {'quantity_step':1,'uom':'PCS'}
-        values={**defaults,**i,**r,'decision':decision_label(d,payload.get('metadata',{}).get('版本状态')),'reviewer_name':d.get('reviewer_name'),'review_reason':d.get('reason'),'review_reason_code':d.get('reason_code'),
+        values={**defaults,**i,**r,'decision':decision_label(d,payload.get('metadata',{}).get('版本状态'),row.get('return_requested')),'reviewer_name':d.get('reviewer_name'),'review_reason':d.get('reason'),'review_reason_code':d.get('reason_code'),
             'source_file':i.get('source',{}).get('file'),'source_row':i.get('source',{}).get('row'),'plan_file':i.get('plan_source',{}).get('file'),'plan_row':i.get('plan_source',{}).get('row'),
             'original_status':r['quantity_status'],'original_data':r['data_status'],'original_lower':r['lower'],'original_upper':r['upper'],'original_future':r['future_qty'],
             'submission_reason':o.get('reason'),'submission_user':o.get('user_name'),'submission_at':o.get('at'),'final_exception':d.get('reason') if d.get('forced') else None,
             'pipeline_days':None,'future_days':None,'is_key_model':'是' if i.get('is_key_model') is True else '否' if i.get('is_key_model') is False else None}
-        final = metadata.get('版本状态') in ('APPROVED','PARTIALLY_APPROVED','REJECTED')
-        if final and d.get('status') in ('REJECTED','APPROVED','EXCEPTION_APPROVED','BATCH_APPROVED'):
-            for qty,field in [('approved_sea','sea_plan_qty'),('approved_air','air_plan_qty')]:
-                values[qty] = 0 if d['status']=='REJECTED' else n(i.get(field))
+        values['plan_outcome'] = basis['label']
+        for transport in ('sea','air'):
+            qty=n(i.get(transport+'_plan_qty'))
+            approved_line=d.get('status') in APPROVALS
+            values['executable_'+transport] = qty if state=='APPROVED' and basis['executable'] and approved_line else 0
+            if state=='PARTIALLY_APPROVED':
+                values['historical_'+transport] = qty if approved_line else 0 if d.get('status')=='REJECTED' else None
         values['return_reason'] = row.get('return_reason')
         for col,(key,_) in enumerate(columns,1):
             v=values.get(key)
             if key in ('reason_code','review_reason_code') and isinstance(v,str):v=REASON_LABELS.get(v,v)
             if key=='manual_flags':v='；'.join(FLAG_LABELS.get(f,f) for f in v or [])
             if key in ('quantity_status','review_mode','data_status','decision','original_status','original_data'):v=TEXT.get(v,v)
-            literal(ws.cell(idx,col),v,key in NUMERIC or key in ('vehicle_parc','future_fleet_qty','approved_sea','approved_air'))
+            literal(ws.cell(idx,col),v,key in NUMERIC or key in ('vehicle_parc','future_fleet_qty','executable_sea','executable_air','historical_sea','historical_air','current_sales','shortage_qty'))
         if v3: write_target_formulas(ws,calc,idx,row,formula)
         if r.get('basis_pending'):
             literal(calc.cell(idx,1),i['material_code'])
@@ -221,7 +275,7 @@ def export_workbook(payload):
             for code,body in reversed(list(choices.items())):expr=f'IF(G{idx}="UK-R{code}",{body},{expr})'
             formula(calc,f'{col}{idx}',expr,n(cached))
         formula(ws,f'AG{idx}',f'IF(COUNT(AE{idx},AF{idx})=2,MAX(AE{idx},AF{idx}),"")',n(r.get('m')))
-        supply_col = 'AJ' if v3 else 'D'
+        supply_col = 'AJ' if v3 and not current_v3 else 'D'
         supply_ref = R(supply_col)
         formula(ws,f'F{idx}',f'IF(COUNT(E{idx},C{idx},{supply_col}{idx})=3,E{idx}+C{idx}+{supply_col}{idx},"")',n(r.get('future_qty')))
         for col,raw in [('G','H'),('H','I')]:
@@ -231,7 +285,11 @@ def export_workbook(payload):
         errors=[f'{R("A")}=""',f'AND({R("B")}="",{R("AM")}="")',f'COUNT({t},{sea},{air},{step})<>4',f'{sea}<0',f'{air}<0',f'{step}<=0',f'ROUND({sea}/{step},10)<>ROUND({sea}/{step},0)',f'ROUND({air}/{step},10)<>ROUND({air}/{step},0)',f'{w}>1',f'AND(G{idx}="",D{idx}<>1)',f'AND(G{idx}="UK-R08",{key}<>"是",{key}<>"否")',f'AND(ISNUMBER({R("G")}),ISNUMBER({R("H")}),{R("G")}>{R("H")})']
         for field in ('AD','AE','AF','AK','T','U') + (('AJ','BA') if v2 else ()):
             ref=R(field);errors.append(f'AND({ref}<>"",OR(NOT(ISNUMBER({ref})),{ref}<0))')
-        if v3:
+        if current_v3:
+            for field in ('current_sales','shortage_qty'):
+                ref = R(column_letters[field])
+                errors.append(f'OR(NOT(ISNUMBER({ref})),{ref}<0)')
+        elif v3:
             errors.append(f'NOT(ISNUMBER({supply_ref}))')
         errors.append('AND('+','.join(f'{R("AY")}<>"{u}"' for u in ('PCS','EA','SET','L','KG','M'))+')')
         formula(calc,f'J{idx}','IFERROR(OR('+','.join(errors)+'),TRUE)',r['data_status']=='ERROR')
@@ -242,7 +300,7 @@ def export_workbook(payload):
         formula(ws,f'K{idx}',f'IF({error},"数据错误",IF({warn},"需关注","有效"))',TEXT[r['data_status']])
         usable=not r['errors'] and r['review_mode']=='AUTO';low=high=None
         if usable:
-            base=n(i['net_supply_before_plan'])+n(i['on_hand_qty' if v3 else 'air_plan_qty']);st=n(i.get('quantity_step',1))
+            base=n(i['net_supply_before_plan'])+n(i['on_hand_qty' if supply_col=='AJ' else 'air_plan_qty']);st=n(i.get('quantity_step',1))
             low=(max(Decimal(0),n(r['lower'])-base)/st).to_integral_value(rounding=ROUND_CEILING)*st
             high=((n(r['upper'])-base)/st).to_integral_value(rounding=ROUND_FLOOR)*st
         gate=f'OR(J{idx},B{idx}=1,D{idx}=1)'
@@ -295,10 +353,18 @@ def export_workbook(payload):
     if v2:
         metadata['周转天数'] = '月均销量取近三个月与近半年月均的较大值。净库存及补货后库存按每月30天折算；未来库存含本次海运和空运。'
     if v3:
-        metadata['周转天数'] = 'V3 未来库存＝在库数量＋审核前净额＋海运计划。补货后周转天数＝未来库存÷最大月均销量×30。'
+        supply_description = '审核前净额＋海运计划＋空运计划' if current_v3 else '在库数量＋审核前净额＋海运计划'
+        metadata['周转天数'] = f'V3 未来库存＝{supply_description}。补货后周转天数＝未来库存÷最大月均销量×30。'
         metadata['公式说明'] = '浅蓝色单元格包含公式。月均销量、自动目标、数量和周转判断按本版标准重算。核定更换率来自本版物料主数据。'
         metadata['留档说明'] = '人工决定、核准数量和审核时结果按提交版本留档。'
         metadata['分类与目标口径'] = '物料按本仓绑定的标准匹配。按储备月数计算的目标保留公式，来源目标保留原值。'
+    if state:
+        metadata['整单结论'] = basis['label']
+        if state in ('APPROVED','REJECTED','PARTIALLY_APPROVED'):
+            metadata['终审结果'] = basis['label']
+        metadata['执行口径'] = '海运计划、空运计划为申报数量。仅当前版本整单通过后，方可按本版可执行数量执行。'
+        if state=='PARTIALLY_APPROVED':
+            metadata['旧规则留档'] = '历史核准量保留当时的逐行决定。本版本全部物料的可执行量为 0。'
     for k,v in metadata.items():literal(meta.cell(meta.max_row+1 if meta['A1'].value is not None else 1,1),k);literal(meta.cell(meta.max_row,2),v)
     for sheet in (ws,params,calc):
         for cell in sheet[1]:cell.font=Font(bold=True,color='FFFFFF');cell.fill=PatternFill('solid',fgColor='31263B')
@@ -308,4 +374,8 @@ def export_workbook(payload):
     if v2: ws.column_dimensions['BD'].width = 46
     ws.column_dimensions['AH'].width=34;ws.column_dimensions['AI'].width=34
     meta.column_dimensions['A'].width=25;meta.column_dimensions['B'].width=105;params.column_dimensions['A'].width=30
+    from .export_layout import add_business_sheet
+    outcome_columns=[pair for pair in EXECUTION_COLUMNS+ARCHIVE_COLUMNS if pair[0] in column_letters]
+    caches,description=add_business_sheet(wb,payload,files,column_letters,ws,calc,caches,v3,v2,literal,outcome_columns)
+    meta.append(['审核主表版式',description])
     return cached_book(wb,caches)

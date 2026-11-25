@@ -8,28 +8,75 @@ import zipfile
 import time,re
 from openpyxl import load_workbook
 from .rules import number, serial, calculate, fingerprint
-from .rules import canonical_reason
+from .rules import canonical_reason, sales_input_errors
+from .workbook_language import canonical_workbook_header
 
 MAX_BYTES = 20 * 1024 * 1024
 MAX_ROWS = 10000
 FIELDS = {
     "material_code": "物料号", "material_name": "物料名称", "material_type": "物料类型", "material_abc": "物料分类ABC",
     "vehicle_model": "车型", "local_abc": "本地ABC", "is_key_model": "是否重点车型", "fleet_qty": "装车量", "vehicle_parc": "备件保有量",
-    "future_fleet_qty": "未来装车量",
+    "future_fleet_qty": "未来装车量", "current_sales": "当月销量", "shortage_qty": "缺货",
     "avg_sales_3m": "近三个月月均销量", "avg_sales_6m": "近六个月月均销量", "replacement_rate": "稳态更换率",
     "replacement_target": "更换率目标库存", "sales_target": "销量目标库存", "net_supply_before_plan": "审核前净额",
     "sea_plan_qty": "海运计划", "air_plan_qty": "空运计划", "on_hand_qty": "在库数量", "in_transit_qty": "在途数量",
     "on_order_qty": "在订数量", "demand_deduction_qty": "需求抵扣数量", "uom": "计量单位", "quantity_step": "订货步长",
     "reason_code": "原因类别", "reason": "计划说明", "air_reason": "空运说明", "source_line_id": "源明细行ID", "source_note": "备注",
 }
+ENGLISH_FIELDS = {
+    'material_code': 'Material number',
+    'material_name': 'Material name',
+    'material_type': 'Material type',
+    'material_abc': 'Material ABC class',
+    'vehicle_model': 'Vehicle model',
+    'local_abc': 'Local ABC',
+    'is_key_model': 'Priority model',
+    'fleet_qty': 'Installed base',
+    'vehicle_parc': 'Vehicle parc for this part',
+    'future_fleet_qty': 'Projected installed base',
+    'current_sales': 'Current-month sales',
+    'shortage_qty': 'Shortage quantity',
+    'avg_sales_3m': 'Average monthly sales (3 months)',
+    'avg_sales_6m': 'Average monthly sales (6 months)',
+    'replacement_rate': 'Steady-state replacement rate',
+    'replacement_target': 'Replacement-based stock target',
+    'sales_target': 'Sales-based stock target',
+    'net_supply_before_plan': 'Pre-review net supply',
+    'sea_plan_qty': 'Sea freight plan',
+    'air_plan_qty': 'Air freight plan',
+    'on_hand_qty': 'On-hand quantity',
+    'in_transit_qty': 'In-transit quantity',
+    'on_order_qty': 'On-order quantity',
+    'demand_deduction_qty': 'Demand deduction',
+    'uom': 'Unit of measure',
+    'quantity_step': 'Order increment',
+    'reason_code': 'Reason category',
+    'reason': 'Plan notes',
+    'air_reason': 'Air freight notes',
+    'source_line_id': 'Source line ID',
+    'source_note': 'Notes',
+}
+
 PLAN_COLUMNS = ("material_code", "material_name", "sea_plan_qty", "air_plan_qty", "reason_code", "reason", "air_reason")
 PLAN_QUANTITIES = ("sea_plan_qty", "air_plan_qty")
 PLAN_LABELS = {FIELDS[key] for key in PLAN_COLUMNS}
 REFERENCE_HEADERS = {"large_value_flag": "高单价大体积识别", "current_sales": "当月销量", "shortage_qty": "缺货"}
 
 
+def source_columns(headers, mapping):
+    columns = {}
+    available = set(headers)
+    for key, label in FIELDS.items():
+        candidates = (mapping[key], key) if mapping.get(key) else (label, ENGLISH_FIELDS[key], key)
+        match = next((title for title in candidates if title in available), None)
+        if match is not None:
+            columns[key] = match
+    return columns
+
+
 def plan_header(label):
     """An annotated plan header keeps the field name on its first line."""
+    label = canonical_workbook_header(label)
     if isinstance(label, str):
         lines = label.splitlines()
         if len(lines) > 1 and lines[0].strip() in PLAN_LABELS:
@@ -120,6 +167,10 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
         normalized = normalize(item, row, sheet, filename, net_mode, kind == "legacy")
         if kind in ("v2", "v3"):
             normalized["source"]["adapter"] = "PLAN-" + kind.upper()
+        if kind == "v3" and normalized["material_code"]:
+            for error in sales_input_errors(normalized):
+                issues.append({"row": row, "material_code": normalized["material_code"],
+                               **error, "repair_hint": "补齐本期实际数量后重新上传"})
         if formulas:
             normalized["source_formulas"] = formulas
         if plan_upload:
@@ -152,7 +203,7 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                 if FIELDS["material_code"] in map(plan_header, candidate):
                     default_sheet = "计划明细"
             if kind in ("standard", "plan") and not mapping and not sheet_name and "审核表" in wb.sheetnames:
-                candidate = next(wb["审核表"].values, ())
+                candidate = [canonical_workbook_header(h) for h in next(wb["审核表"].values, ())]
                 if all(h in candidate for h in V2_HEADERS.values()) or (plan_upload and "近半年月均销量" in candidate):
                     default_sheet = "审核表"
             if plan_upload and not mapping and not sheet_name and default_sheet != "审核表" and "Sheet1" in wb.sheetnames:
@@ -166,7 +217,7 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
             rows = ws.iter_rows(values_only=True)
             formula_rows=formula_book[ws.title].iter_rows(values_only=True)
             next(formula_rows)
-            headers = [str(x or "").strip() for x in next(rows)]
+            headers = [canonical_workbook_header(str(x or "").strip()) for x in next(rows)]
             if kind == "plan":
                 headers = [plan_header(header) for header in headers]
             if len(headers)>100:raise ValueError("超过100列限制")
@@ -188,6 +239,8 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                 if "未来装车量" in headers:
                     indices["future_fleet_qty"] = headers.index("未来装车量")
                     kind = "v3"
+                    if "缺货" not in headers:
+                        raise ValueError("V3 审核表缺少必填列：U 缺货")
                 elif kind == "v3":
                     raise ValueError("V3 审核表缺少列：未来装车量")
                 indices.update({key:headers.index(label) for key,label in REFERENCE_HEADERS.items() if label in headers})
@@ -201,9 +254,10 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                     raise ValueError("六个月的月销量列须分别标明月份")
             elif kind == "legacy":
                 indices = {key:column_index_from_string(col)-1 for col,key in LEGACY_MAP.items()}
+                indices.update({key:headers.index(label) for key,label in REFERENCE_HEADERS.items() if label in headers})
+                month_labels = headers[10:16]
             else:
-                indices = {key:headers.index(labels.get(key) or FIELDS[key]) if (labels.get(key) or FIELDS[key]) in headers else headers.index(key)
-                           for key in FIELDS if (labels.get(key) or FIELDS[key]) in headers or key in headers}
+                indices = {key:headers.index(label) for key,label in source_columns(headers, labels).items()}
             for r, row_values in enumerate(rows, 2):
                 formula_values=next(formula_rows,())
                 if r>MAX_ROWS+1 or len(row_values)>100:raise ValueError("超过10000行或100列限制")
@@ -230,6 +284,9 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                     item["monthly_sales"] = dict(zip(month_labels, map(canonical, months)))
                     item["month_labels"] = month_labels
                     item["is_key_model"] = boolean(item.get("is_key_model")) is True
+                elif kind == "legacy" and len(set(month_labels)) == 6 and all(month_labels):
+                    item["monthly_sales"] = dict(zip(month_labels, map(canonical,row_values[10:16])))
+                    item["month_labels"] = month_labels
                 add_item(item, r, ws.title, provenance)
             wb.close()
             formula_book.close()
@@ -245,12 +302,13 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
             if len(headers)!=len(set(headers)):raise ValueError('表头存在重名列，请先区分字段')
             if len(headers) > 100:
                 raise ValueError("超过100列限制")
+            columns = source_columns(headers, labels)
             for r, source in enumerate(reader, 2):
                 if r > MAX_ROWS+1:
                     raise ValueError("超过10000行限制")
                 if kind == "plan" and not any(value is not None and str(value).strip() for value in source.values()):
                     continue
-                item = {k: source.get((labels.get(k) or FIELDS[k]), source.get(k)) for k in FIELDS}
+                item = {k: source.get(columns.get(k)) if k in columns else None for k in FIELDS}
                 add_item(item, r, "CSV")
         except UnicodeDecodeError as e:
             raise ValueError("CSV需要使用UTF-8编码") from e

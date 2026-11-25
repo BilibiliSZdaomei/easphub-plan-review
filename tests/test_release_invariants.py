@@ -28,7 +28,7 @@ def test_review_allows_optional_category_and_summary_of_selected_only(clients):
     p,r,a,s=clients;b,v=ready(p);post(p,'/versions/'+v['id']+'/submit',{'revision':v['revision']})
     v=claim(r,'/versions/'+v['id']);first=next(i['id'] for i in v['items'] if i['input']['material_code']=='DEMO-0001')
     meta=post(r,'/versions/'+v['id']+'/review-summary',{'ids':[first]}).json()
-    assert meta=={'flags':[],'exception':False,'count':1}
+    assert meta=={'flags':[],'exception':False,'exception_count':0,'count':1}
     result=post(r,'/versions/'+v['id']+'/reviews',{'revision':v['revision'],'ids':[first],'decision':'EXCEPTION_APPROVED'})
     assert result.status_code==200 and result.json()['count']==1
 

@@ -173,7 +173,7 @@ def test_export_literal_text_and_audit_scope(clients):
     assert s.get(done['download_url']).status_code==403
     wb=load_workbook(BytesIO(data.content));ws=wb['计划审核结果']
     assert ws.max_row==2 and ws['O2'].value.startswith('=HYPERLINK') and ws['O2'].data_type=='s'
-    assert ws['C2'].data_type=='n' and ws['A2'].data_type=='s'
+    assert wb.active['A2'].data_type=='s' and ws['C2'].data_type=='f'
     assert dict(wb['版本与来源'].values)['导出范围']=='筛选结果'
     wb.close()
 

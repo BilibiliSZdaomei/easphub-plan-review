@@ -66,7 +66,7 @@ def test_plan_bound_download_and_import_keeps_the_correct_calendar_months(client
     book=load_workbook(BytesIO(response.content))
     try:
         sheet=book['审核表']
-        sheet['A2']='M-2026';sheet['X2']=1
+        sheet['A2']='M-2026';sheet['X2']=1;sheet['T2']=0;sheet['U2']=0
         for n,letter in enumerate('NOPQRS',1):sheet[f'{letter}2']=n
         edited=BytesIO()
         book.save(edited)

@@ -1,22 +1,43 @@
+from . import plan_undo
+from .workflow_outbox import enqueue as enqueue_workflow_mail
 from copy import deepcopy
 from datetime import datetime
 from collections import Counter
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified, set_committed_value
 from .db import Batch, Version, Rule, Snapshot, User, Notification, NotificationEvent,Warehouse, audit, uid, now
 from .auth import role, scope
 from .roles import has_role
+from .plan_visibility import visible_batch_filter
 from .governance import apply_governance, MASTER_FIELDS
 from .rules import calculate, pending_plan_result, submission_issues, fingerprint, validate_package
-from .rules import canonical_reason, REASON_LABELS
+from .rules import canonical_reason, REASON_LABELS, MODEL_V3, corrected_v3, sales_input_errors
 from .periods import period_info
-from .exceptions import business_warnings, confirmation, warning_record
+from .exceptions import approval_status, business_warnings, confirmation, warning_record
 from .markets import rule_scopes
 from .adapters import boolean, canonical, v2_sales
 from .rules import number, serial
 
 def demand(condition,message,status=422):
     if not condition: raise HTTPException(status,message)
+
+
+def require_current_sales(item, package, line=None):
+    if corrected_v3(package):
+        errors = sales_input_errors(item)
+        if errors:
+            prefix = f"第 {line} 行 " if line is not None else ""
+            raise HTTPException(422, prefix + str(item.get("material_code") or "") + " · " +
+                                "；".join(error["message"] for error in errors))
+
+
+def check_submission_inputs(rows, package):
+    if package.get('model') != MODEL_V3:
+        return
+    demand(corrected_v3(package), '本草稿仍按旧版 V3 计算，请更换计算依据，选用现行标准并确认差异后再提交', 409)
+    for line, row in enumerate(rows, 1):
+        require_current_sales(row['input'], package, line)
 
 def active_rule(db,warehouse,required=True):
     w=db.get(Warehouse,warehouse)
@@ -32,13 +53,32 @@ def batch_access(db,user,batch_id):
     batch=db.get(Batch,batch_id)
     demand(batch is not None,'计划不存在',404)
     scope(user,batch.warehouse)
+    if batch.owner != user.id:
+        allowed = db.scalar(select(Batch.id).where(Batch.id == batch.id, visible_batch_filter(db, user)))
+        demand(allowed is not None, '没有该计划的访问权限', 403)
     return batch
+
+def reopen_legacy_rejections(batch, version):
+    """Older returned drafts carried the previous rejection as a current decision."""
+    if version.state!='DRAFT' or batch.state!='RETURNED' or batch.current_id!=version.id:
+        return
+    if not any((row.get('decision') or {}).get('status') in ('REJECTED','RETURNED') for row in version.items):
+        return
+    rows=deepcopy(version.items)
+    for row in rows:
+        decision=row.get('decision') or {}
+        if decision.get('status') in ('REJECTED','RETURNED'):
+            row.update(previous_decision=decision,decision=None,return_requested=True,return_reason=decision.get('reason') or '')
+    # Project the editable draft on read. The next saved edit or submission persists it.
+    set_committed_value(version,'items',rows)
+
 
 def version_access(db,user,version_id,lock=True):
     query=select(Version).where(Version.id==version_id)
     version=db.scalar(query.with_for_update() if lock else query)
     demand(version is not None,'版本不存在',404)
     batch=batch_access(db,user,version.batch_id)
+    reopen_legacy_rejections(batch,version)
     return batch,version
 
 def editable(user,batch,version,revision):
@@ -70,6 +110,7 @@ def summary(items):
 
 def batch_json(db,batch):
     version=db.get(Version,batch.current_id)
+    reopen_legacy_rejections(batch,version)
     owner=db.get(User,batch.owner)
     warehouse=db.get(Warehouse,batch.warehouse)
     return {'id':batch.id,'number':batch.number,'title':batch.title,'warehouse':batch.warehouse,'warehouse_name':warehouse.name,
@@ -77,8 +118,11 @@ def batch_json(db,batch):
             **assignment(db,batch,version),
             'version':version.seq,'revision':version.revision,'summary':summary(version.items),'created_at':batch.created_at,'updated_at':batch.updated_at}
 
-def notify(db,batch,text,reviewers=False,recipient=None):
-    db.add(NotificationEvent(id=uid(),payload={'warehouse':batch.warehouse,'batch_id':batch.id,'owner':batch.owner,'text':text,'reviewers':reviewers,'recipient':recipient}))
+def notify(db,batch,text,reviewers=False,recipient=None,*,kind='GENERAL'):
+    event=NotificationEvent(id=uid(),created_at=now(),payload={'warehouse':batch.warehouse,'batch_id':batch.id,'owner':batch.owner,'text':text,'reviewers':reviewers,'recipient':recipient,
+        'kind':kind,'version_id':batch.current_id})
+    db.add(event)
+    return event
 
 def new_batch(db,user,data,*,copied_from=None):
     role(user,'PLANNER'); warehouse=data.get('warehouse'); scope(user,warehouse)
@@ -100,7 +144,7 @@ def new_batch(db,user,data,*,copied_from=None):
     db.add(ver);db.flush();batch.current_id=ver.id
     audit(db,user,'复制为新计划' if copied_from else '新建计划',warehouse,batch.id,ver.id,title=title,**(copied_from or {}))
     warning_count=summary(items)['attention']
-    if warning_count:notify(db,batch,f'{title} 有 {warning_count} 行审核提醒')
+    if warning_count:notify(db,batch,f'{title} 有 {warning_count} 行审核提醒',kind='REMINDER')
     return batch
 
 
@@ -188,11 +232,14 @@ def plan_result(item,rule,snapshot_id):
 
 def patch_items(db,user,version_id,data):
     batch,ver=version_access(db,user,version_id);editable(user,batch,ver,data.get('revision'))
+    undo_before=plan_undo.capture(ver)
     rows=deepcopy(ver.items); by_id={r['id']:r for r in rows}; changes=data.get('changes',[])
     demand(isinstance(changes,list) and 0<len(changes)<=10000,'请选择要修改的计划行')
     rule=db.get(Rule,ver.rule_id)
     snapshot=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None
+    applied=[]
     for change in changes:
+        demand(isinstance(change,dict),'计划行修改格式无效')
         row=by_id.get(change.get('id')); demand(row is not None,'计划行不存在',404)
         values=change.get('values',{})
         demand(isinstance(values,dict) and set(values)<=set(PLAN_FIELDS),'包含不可编辑的计划字段')
@@ -203,21 +250,47 @@ def patch_items(db,user,version_id,data):
         governed=set((row['result'].get('master_basis') or {}).get('values',{}))
         locked=governed.intersection(refs)
         demand(not locked,'这些字段由审核标准维护 · '+'、'.join(MASTER_FIELDS[k] for k in sorted(locked)))
-        if any(row['input'].get(k)!=v for k,v in refs.items()):
-            row['input']['reference_origin']='planner'
         values={**values,**refs}
-        before={k:row['input'].get(k) for k in values};before_result=deepcopy(row['result'])
-        if any(row['input'].get(k)!=v for k,v in values.items()):
-            row['decision']=None
-        row['input'].update(values);row.pop('submission_override',None)
-        row['result']=plan_result(row['input'],rule,ver.snapshot_id)
+        different={k:v for k,v in values.items() if row['input'].get(k)!=v}
+        for key in different.keys() & {'sea_plan_qty','air_plan_qty'}:
+            old_value=row['input'].get(key)
+            new_value=different[key]
+            if '%' in str(old_value) or '%' in str(new_value):
+                continue
+            try:
+                old_number=number(old_value)
+                if old_number is not None and old_number>=0 and old_number==number(new_value):
+                    del different[key]
+            except ValueError:
+                pass  # Keep invalid input visible to the quantity checks.
+        candidate={**row['input'],**different}
+        if different.keys() & refs.keys():
+            candidate['reference_origin']='planner'
+        if refs:
+            require_current_sales(candidate, rule.package)
+        if not different and 'reference' not in change:
+            continue
+        result=plan_result(candidate,rule,ver.snapshot_id)
+        if not different and result==row['result']:
+            continue
+        applied.append(change)
+        before={k:row['input'].get(k) for k in values};before_result=row['result']
+        row['decision']=None
+        row['input']=candidate
+        row.pop('submission_override',None)
+        row['result']=result
         row['adjustment']={'at':now(),'before':before,'after':deepcopy(values),'quantity_before':before_result['quantity_status'],'quantity_after':row['result']['quantity_status'],'review_reason':bool(row['input'].get('reason')) and any(k in values for k in ('sea_plan_qty','air_plan_qty'))}
+    if not applied:
+        return {'revision':ver.revision,'summary':summary(ver.items)}
     ver.items=rows; batch.updated_at=now()
-    audit(db,user,'修改计划',batch.warehouse,batch.id,ver.id,changes=changes)
-    db.flush();return {'revision':ver.revision,'summary':summary(rows)}
+    audit(db,user,'修改计划',batch.warehouse,batch.id,ver.id,changes=applied)
+    db.flush()
+    plan_undo.record(db,user,ver,undo_before,"修改计划明细")
+    return {'revision':ver.revision,'summary':summary(rows)}
 
 def add_items(db,user,version_id,data):
     batch,ver=version_access(db,user,version_id);editable(user,batch,ver,data.get('revision'))
+    undo_before=plan_undo.capture(ver)
     sources=plan_sources(db,ver)
     codes={r['input']['material_code'] for r in ver.items};rows=deepcopy(ver.items)
     plans=data.get('items')
@@ -231,15 +304,20 @@ def add_items(db,user,version_id,data):
         if plan.get('reference'):
             inp.update(reference_changes(inp,plan['reference'],bool(snapshot and snapshot.net_mode=='COMPONENTS')))
             inp['reference_origin']='planner'
+        require_current_sales(inp, rule.package)
         rows.append({'id':uid(),'input':inp,'result':plan_result(inp,rule,ver.snapshot_id),'decision':None});codes.add(code)
     ver.items=rows;batch.updated_at=now();audit(db,user,'添加计划行',batch.warehouse,batch.id,ver.id,count=len(rows));db.flush()
+    plan_undo.record(db,user,ver,undo_before,"添加物料")
     return {'revision':ver.revision,'summary':summary(rows)}
 
 def delete_items(db,user,version_id,data):
     batch,ver=version_access(db,user,version_id);editable(user,batch,ver,data.get('revision'))
+    undo_before=plan_undo.capture(ver)
     ids=set(data.get('ids',[])); demand(ids,'请选择计划行')
+    demand(ids<={row['id'] for row in ver.items},'所选记录不属于当前版本')
     ver.items=[r for r in ver.items if r['id'] not in ids];batch.updated_at=now()
     audit(db,user,'删除计划行',batch.warehouse,batch.id,ver.id,ids=list(ids));db.flush()
+    plan_undo.record(db,user,ver,undo_before,"删除物料")
     return {'revision':ver.revision}
 
 def submit(db,user,version_id,data):
@@ -248,6 +326,7 @@ def submit(db,user,version_id,data):
     rows=deepcopy(ver.items)
     rule=db.get(Rule,ver.rule_id)
     demand(rule.state=='PUBLISHED','必须选择已发布审核标准')
+    check_submission_inputs(rows, rule.package)
     for row in rows:
         row['result']=plan_result(row['input'],rule,ver.snapshot_id)
         row.pop('submission_override',None)
@@ -259,9 +338,13 @@ def submit(db,user,version_id,data):
         if row['id'] in warnings:
             row['submission_override']={**record,'issues':warnings[row['id']]}
     ver.items=rows;ver.state='SUBMITTED';ver.submitted_at=at;batch.state='SUBMITTED';batch.updated_at=at
+    # Freeze the projected legacy draft even when calculation reproduces it exactly.
+    flag_modified(ver,'items')
     audit(db,user,'提交复审',batch.warehouse,batch.id,ver.id,input_hash=fingerprint(rows),rule_id=ver.rule_id,
           snapshot_id=ver.snapshot_id,warning_rows=report['affected_count'],issue_hash=report['issue_hash'],reason=record['reason'])
-    notify(db,batch,batch.title+' 已提交，等待复审',True);db.flush()
+    event=notify(db,batch,batch.title+' 已提交，等待复审',True,kind='SUBMITTED')
+    enqueue_workflow_mail(db,event,'RESUBMITTED' if ver.seq>1 else 'SUBMITTED',batch,ver,user)
+    db.flush()
     return {'id':batch.id,'version_id':ver.id,'state':batch.state,'revision':ver.revision}
 
 ACTIVE_REVIEW_STATES = ('SUBMITTED','IN_REVIEW')
@@ -297,6 +380,8 @@ def claim(db,user,version_id,data):
     ver.reviewer_name=user.name
     ver.state=batch.state='IN_REVIEW'
     batch.updated_at=now()
+    event=notify(db,batch,f'{user.name} 已领取「{batch.title}」的复审',kind='CLAIMED')
+    enqueue_workflow_mail(db,event,'CLAIMED',batch,ver,user)
     audit(db,user,'领取复审',batch.warehouse,batch.id,ver.id,previous_reviewer_id=old,reviewer_id=user.id,reviewer_name=user.name)
     db.flush()
     return {'revision':ver.revision,'reviewer_id':user.id,'reviewer_name':user.name}
@@ -313,66 +398,87 @@ def transfer(db,user,version_id,data):
     batch.updated_at=now()
     audit(db,user,'转交复审',batch.warehouse,batch.id,ver.id,from_reviewer_id=user.id,from_reviewer_name=user.name,
           reviewer_id=target.id,reviewer_name=target.name)
-    notify(db,batch,f'{user.name} 将「{batch.title}」转交给你复审',reviewers=True,recipient=target.id)
+    event=notify(db,batch,f'{user.name} 将「{batch.title}」转交给你复审',reviewers=True,recipient=target.id,kind='TRANSFERRED')
+    enqueue_workflow_mail(db,event,'TRANSFERRED',batch,ver,user,target=target)
     db.flush()
     return {'revision':ver.revision,'reviewer_id':target.id,'reviewer_name':target.name}
 
 
 def review(db,user,version_id,data):
     batch,ver=review_access(db,user,version_id,data.get('revision'))
+    undo_before=plan_undo.capture(ver)
     ids=set(data.get('ids',[]));demand(ids,'请选择复审记录')
     demand(ids <= {r['id'] for r in ver.items},'所选记录不属于当前版本')
     action=data.get('decision','APPROVED');demand(action in ('APPROVED','EXCEPTION_APPROVED','REJECTED','RETURNED'),'无效审批动作')
     reason=str(data.get('reason') or '').strip()
     demand(len(reason)<=2000,'复审备注最多2000字')
-    if action in ('RETURNED','REJECTED'):
-        demand(reason,'请填写该物料的复审原因')
+    approve=action in ('APPROVED','EXCEPTION_APPROVED')
     flags_input=data.get('ack_flags',[])
     demand(isinstance(flags_input,list) and all(isinstance(f,str) for f in flags_input),'关注项格式无效')
     ack=set(flags_input);air=data.get('air_confirmed') is True
     reason_code=canonical_reason(data.get('reason_code'))
     demand(not reason_code or (isinstance(reason_code,str) and reason_code in REASON_LABELS),'无效的复审原因类别')
     only_pending = len(ids)>1 or data.get('only_pending') is True
-    rows=deepcopy(ver.items);processed=[];preserved=0
+    rows=deepcopy(ver.items);processed=[];preserved=0;exceptions=0
     for row in rows:
         if row['id'] not in ids: continue
         if only_pending and row.get('decision'):
             preserved+=1
             continue
         flags=set(row['result']['manual_flags'])
-        row['decision']={'status':action,'reason':reason,'reason_code':reason_code,'reviewer_id':user.id,
-                         'reviewer_name':user.name,'reviewed_at':now(),'ack_flags':sorted((flags-{'AIR'}) & ack),
-                         'air_confirmed':'AIR' in flags and air}
+        outcome=approval_status(row['result']) if approve else 'REJECTED'
+        decision={'status':outcome,'reason':reason,'reason_code':reason_code,'reviewer_id':user.id,
+                  'reviewer_name':user.name,'ack_flags':sorted((flags-{'AIR'}) & ack),
+                  'air_confirmed':'AIR' in flags and air}
+        previous={k:v for k,v in (row.get('decision') or {}).items() if k!='reviewed_at'}
+        if previous==decision:
+            preserved+=1
+            continue
+        exceptions+=outcome=='EXCEPTION_APPROVED'
+        row['decision']={**decision,'reviewed_at':now()}
         processed.append(row['id'])
     if processed:
         ver.items=rows;ver.state='IN_REVIEW';batch.state='IN_REVIEW';batch.updated_at=now()
-        audit(db,user,'保存行复审',batch.warehouse,batch.id,ver.id,ids=processed,count=len(processed),decision=action,reason=reason)
+        audit(db,user,'保存行复审',batch.warehouse,batch.id,ver.id,ids=processed,count=len(processed),
+              decision='APPROVED' if approve else 'REJECTED',exception_approved=exceptions,reason=reason)
         db.flush()
-    return {'count':len(processed),'preserved':preserved,'skipped':[],'revision':ver.revision,'summary':summary(rows)}
+        plan_undo.record(db,user,ver,undo_before,"复审决定")
+    return {'count':len(processed),'exception_count':exceptions,'preserved':preserved,'skipped':[],'revision':ver.revision,'summary':summary(rows)}
 
 def finalize(db,user,version_id,data):
     batch,ver=review_access(db,user,version_id,data.get('revision'))
     demand(bool(ver.items),'空白计划不能终审')
+    outcome=data.get('outcome','APPROVED')
+    demand(outcome in ('APPROVED','REJECTED'),'请选择有效的整单终审结果')
     report=confirmation(ver.items,'finalize',ver.revision)
-    demand(not report['return_marked'],'当前版本有待退回物料，请先退回修改或变更行决定')
+    if outcome=='REJECTED':
+        demand(report['approval_blocked'],'当前没有不批准的物料，不能整单不批准')
+    else:
+        demand(not report['approval_blocked'],'存在不批准的物料，请退回计划，或选择整单不批准')
     at=now()
     record=warning_record(data,report,user,at)
-    if report['unreviewed']:
+    if outcome=='APPROVED' and report['unreviewed']:
         rows=deepcopy(ver.items)
         for row in rows:
             if not row.get('decision'):
-                row['decision']={'status':'BATCH_APPROVED','reviewer_id':user.id,'reviewer_name':user.name,
+                row['decision']={'status':approval_status(row['result']),'batch':True,'reviewer_id':user.id,'reviewer_name':user.name,
                                  'reviewed_at':at,'reason':record['reason'],'ack_flags':[],'air_confirmed':False}
         ver.items=rows
-    rejected=report['rejected']
-    state='REJECTED' if rejected==len(ver.items) else 'PARTIALLY_APPROVED' if rejected else 'APPROVED'
-    message={'APPROVED':'已通过终审','PARTIALLY_APPROVED':'复审完成，部分物料不批准','REJECTED':'复审完成，全部物料不批准'}[state]
-    ver.state=batch.state=state
+    approved=report['total'] if outcome=='APPROVED' else 0
+    message=f"已通过终审，核准 {approved} 行" if approved else f"已整单不批准，{report['total']} 行均不执行"
+    ver.state=batch.state=outcome
     ver.finalized_at=at;batch.updated_at=at
-    audit(db,user,'完成终审',batch.warehouse,batch.id,ver.id,rows=len(ver.items),batch_approved=report['unreviewed'],
-          rejected=rejected,approved=len(ver.items)-rejected,warning_rows=report['affected_count'],issue_hash=report['issue_hash'],reason=record['reason'])
-    notify(db,batch,batch.title+' '+message);db.flush()
-    return {'state':state,'revision':ver.revision}
+    audit(db,user,'完成终审',batch.warehouse,batch.id,ver.id,outcome=outcome,rows=report['total'],
+          rejected=report['total']-approved,approved=approved,exception_approved=report['exception_approved'],
+          reviewed_approved=report['reviewed_approved'],reviewed_exception=report['reviewed_exception'],
+          reviewed_rejected=report['rejected'],unreviewed=report['unreviewed'],
+          batch_approved=report['unreviewed'] if approved else 0,
+          warning_rows=report['affected_count'],issue_hash=report['issue_hash'],reason=record['reason'])
+    event=notify(db,batch,batch.title+' '+message,kind='FINALIZED')
+    enqueue_workflow_mail(db,event,outcome,batch,ver,user,approved_count=approved,rejected_count=report['total']-approved,
+                          reason=record['reason'])
+    db.flush()
+    return {'state':outcome,'revision':ver.revision}
 
 def return_batch(db,user,version_id,data):
     batch,old=review_access(db,user,version_id,data.get('revision'))
@@ -382,38 +488,26 @@ def return_batch(db,user,version_id,data):
     demand(isinstance(requested,list) and all(isinstance(i,str) for i in requested),'请选择本版本物料')
     requested=set(requested)
     demand(requested<={row['id'] for row in old.items},'所选物料不属于本版本')
-    # Older clients select several row IDs and supply a shared reason.
-    # Save it on those exact rows, preserving any independently entered reasons.
-    completed=deepcopy(old.items)
-    reasons={}
-    codes=[]
-    at=now()
-    for row in completed:
-        decision=row.get('decision') or {}
-        if row['id'] in requested and decision.get('status')!='RETURNED':
-            demand(reason,'请填写所选物料的退回原因')
-            decision={'status':'RETURNED','reason':reason,'reviewer_id':user.id,'reviewer_name':user.name,
-                      'reviewed_at':at,'ack_flags':[],'air_confirmed':False}
-            row['decision']=decision
-        if decision.get('status')=='RETURNED':
-            reasons[row['id']]=decision['reason']
-            codes.append(row['input']['material_code'])
-    demand(reasons,'请先在需要修改的物料上填写退回原因')
-    old.state='RETURNED';old.items=completed
-    rows=deepcopy(completed)
+    old.state='RETURNED'
+    rows=deepcopy(old.items)
+    flagged=[]
     for row in rows:
-        row['previous_decision']=deepcopy(row.get('decision'));row.pop('submission_override',None)
-        if row['id'] in reasons:
-            row['decision']=None
-            row['return_requested']=True
-            row['return_reason']=reasons[row['id']]
-        else:
-            row.pop('return_requested',None)
-            row.pop('return_reason',None)
+        previous=row.get('decision')
+        row['previous_decision']=deepcopy(previous)
+        row.pop('submission_override',None)
+        row.pop('return_requested',None)
+        row.pop('return_reason',None)
+        if (previous or {}).get('status') in ('REJECTED','RETURNED') or row['id'] in requested:
+            # ids is a compatibility hint from older clients. Preserve the frozen review.
+            row.update(decision=None,return_requested=True,return_reason=(previous or {}).get('reason') or (reason if row['id'] in requested else ''))
+            flagged.append(row)
     ver=Version(id=uid(),batch_id=batch.id,seq=old.seq+1,snapshot_id=old.snapshot_id,rule_id=old.rule_id,items=rows)
     db.add(ver);db.flush();batch.current_id=ver.id;batch.state='RETURNED';batch.updated_at=now()
-    audit(db,user,'退回修改',batch.warehouse,batch.id,old.id,reason=reason,new_version=ver.id,ids=sorted(reasons),material_codes=codes)
-    notify(db,batch,f'{batch.title} 有 {len(reasons)} 行退回修改')
+    audit(db,user,'退回修改',batch.warehouse,batch.id,old.id,reason=reason,new_version=ver.id,
+          ids=[r['id'] for r in flagged],material_codes=[r['input']['material_code'] for r in flagged])
+    detail=f'，{len(flagged)} 行需修改' if flagged else ''
+    event=notify(db,batch,f'{batch.title} 已整单退回{detail}',kind='RETURNED')
+    enqueue_workflow_mail(db,event,'RETURNED',batch,ver,user,flagged_count=len(flagged),reason=reason)
     return {'state':'RETURNED','version_id':ver.id}
 
 def basis_candidate(db,user,version_id,data,lock=False):
@@ -429,7 +523,10 @@ def basis_candidate(db,user,version_id,data,lock=False):
         demand(snapshot is not None or ver.snapshot_id is None,'请选择本仓快照')
         rows=deepcopy(ver.items)
         for row in rows:
-            row['result']=plan_result(row['input'],rule,ver.snapshot_id)
+            result=plan_result(row['input'],rule,ver.snapshot_id)
+            if ver.rule_id==rule.id and row['result']==result:
+                continue
+            row['result']=result
             row['decision']=None
             row.pop('submission_override',None)
         return batch,ver,rule,snapshot,rows
@@ -459,6 +556,11 @@ def preview_basis(db,user,version_id,data):
 
 def switch_basis(db,user,version_id,data):
     batch,ver,rule,snapshot,rows=basis_candidate(db,user,version_id,data,lock=True)
+    undo_before=plan_undo.capture(ver)
+    if ver.rule_id==rule.id and ver.snapshot_id==(snapshot.id if snapshot else None) and ver.items==rows:
+        return {'revision':ver.revision}
     audit(db,user,'切换计算依据',batch.warehouse,batch.id,ver.id,old_rule=ver.rule_id,new_rule=rule.id,old_snapshot=ver.snapshot_id,new_snapshot=snapshot.id if snapshot else None)
     ver.items=rows;ver.rule_id=rule.id;ver.snapshot_id=snapshot.id if snapshot else None;batch.updated_at=now()
-    db.flush();return {'revision':ver.revision}
+    db.flush()
+    plan_undo.record(db,user,ver,undo_before,"更换计算依据")
+    return {'revision':ver.revision}

@@ -1,0 +1,13 @@
+.password-field { display: grid; gap: 6px; }
+.password-field-controls, .quick-row-actions { display: inline-flex; align-items: center; gap: 5px; }
+.password-field-controls input { min-width: 0; flex: 1; }
+.password-field-controls button { flex-shrink: 0; }
+.password-field small { color: var(--ea-muted); }
+.quick-row-actions button { display: inline-grid; place-content: center; width: 27px; height: 27px; padding: 0; border: 1px solid currentColor; border-radius: 6px; background: transparent; }
+.quick-row-actions .quick-approve { color: #217344; }
+.quick-row-actions .quick-reject { color: #ae3844; }
+.quick-row-actions button:hover { background: var(--ea-selection); }
+[data-ea-mode=dark] .quick-row-actions .quick-approve { color: #86d1a1; }
+[data-ea-mode=dark] .quick-row-actions .quick-reject { color: #ff9da8; }
+
+.modal-actions .primary.reject-entire-plan { background: var(--ea-danger); color: white; }

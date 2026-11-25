@@ -1,0 +1,20 @@
+# Overlay for an existing company SMTP relay. No mail server is started here.
+services:
+  web:
+    environment:
+      PLAN_REVIEW_SMTP_HOST: ${PLAN_REVIEW_SMTP_HOST:?Set the company's SMTP host}
+      PLAN_REVIEW_SMTP_FROM: ${PLAN_REVIEW_SMTP_FROM:?Set an authorised sender address}
+  worker:
+    networks:
+      app-private: {}
+      smtp-relay: {}
+    environment:
+      PLAN_REVIEW_SMTP_HOST: ${PLAN_REVIEW_SMTP_HOST:?Set the company's SMTP host}
+      PLAN_REVIEW_SMTP_FROM: ${PLAN_REVIEW_SMTP_FROM:?Set an authorised sender address}
+      PLAN_REVIEW_SMTP_MODE: ${PLAN_REVIEW_SMTP_MODE:-starttls}
+      PLAN_REVIEW_SMTP_PORT: ${PLAN_REVIEW_SMTP_PORT:-}
+      PLAN_REVIEW_PUBLIC_URL: ${PLAN_REVIEW_PUBLIC_URL:-}
+networks:
+  smtp-relay:
+    external: true
+    name: ${PLAN_REVIEW_SMTP_NETWORK:?Set an existing network with access to the SMTP relay}

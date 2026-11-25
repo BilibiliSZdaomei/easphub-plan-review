@@ -3,12 +3,33 @@ from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING, ROUND_FLOOR, localcontext
 import hashlib
 import json
+from .workbook_language import REASONS as WORKBOOK_REASON_LABELS
 from .numbers import number, serial
 from .governance import apply_governance, check_governance
 
 PRECISION_VERSION = "UK0804-decimal-10-half-up-v1"
 MODEL_V2 = "V2"
 MODEL_V3 = "V3"
+V3_REVISION = "2026-11-25"
+V3_REQUIRED_SALES = {"current_sales": "T 当月销量", "shortage_qty": "U 缺货数量"}
+
+
+def corrected_v3(package):
+    return package.get("model") == MODEL_V3 and package.get("v3_revision") == V3_REVISION
+
+
+def sales_input_errors(item):
+    errors = []
+    for key, label in V3_REQUIRED_SALES.items():
+        try:
+            raw = item.get(key)
+            value = number(raw)
+            if value is None or value < 0 or "%" in str(raw):
+                raise ValueError
+        except ValueError:
+            errors.append({"field": key, "message": label + "必填，请填写非负数量，无则填 0"})
+    return errors
+
 REASON_LABELS = {
     "市场需求变化": "预计用量有变化",
     "已确认特殊订单": "已有订单要交付",
@@ -18,6 +39,7 @@ REASON_LABELS = {
     "其他": "其他原因",
 }
 REASON_CODES = {label: code for code, label in REASON_LABELS.items()}
+REASON_CODES.update({en: REASON_CODES[zh] for en, zh in WORKBOOK_REASON_LABELS.items()})
 
 
 def canonical_reason(value):
@@ -75,6 +97,7 @@ def upgrade_to_v2(package):
 def upgrade_to_v3(package):
     updated = upgrade_to_v2(package)
     updated["model"] = MODEL_V3
+    updated["v3_revision"] = V3_REVISION
     updated["params"] = {**TURNOVER_DEFAULTS, **updated["params"]}
     return updated
 
@@ -90,8 +113,10 @@ def validate_package(package):
     if not isinstance(package, dict):
         return ["规则参数格式有误"]
     errors = []
-    if set(package) - {"params", "keywords", "overrides", "model", "precision_version", "master_data", "target_policy"}:
+    if set(package) - {"params", "keywords", "overrides", "model", "precision_version", "master_data", "target_policy", "v3_revision"}:
         errors.append("含有不支持的规则字段")
+    if "v3_revision" in package and not corrected_v3(package):
+        errors.append("V3 修订版本无效")
     if package.get("precision_version") != PRECISION_VERSION:
         errors.append("精度策略必须使用受支持的版本")
     model = package.get("model", "0804")
@@ -216,6 +241,16 @@ def pending_plan_result(item):
     }
 
 
+def match_material_type(item, package):
+    description = str(item.get("material_name") or "") + str(item.get("material_type") or "")
+    hits = {}
+    for group, words in package["keywords"].items():
+        source = description + (str(item.get("material_abc") or "") if group == "maintenance" else "")
+        folded = source.casefold()
+        hits[group] = [word for word in words if word.casefold() in folded]
+    return hits, package.get("overrides", {}).get(str(item.get("material_code")))
+
+
 def calculate(item, package=None):
     package = package or default_package()
     item, master_basis = apply_governance(item, package)
@@ -249,7 +284,9 @@ def calculate(item, package=None):
     if not str(item.get("material_name") or "").strip() and not str(item.get("material_type") or "").strip():
         errors.append({"field": "material_name", "message": "缺少物料名称或类型，无法识别分类"})
     require("net_supply_before_plan", "sea_plan_qty", "air_plan_qty", "quantity_step")
-    if v3:
+    if corrected_v3(package):
+        errors.extend(sales_input_errors(item))
+    elif v3:
         require("on_hand_qty")
     if item.get('uom','PCS') not in ('PCS','EA','SET','L','KG','M'):
         errors.append({'field':'uom','message':'计量单位不在标准合同内，请统一为PCS/EA、SET、L、KG或M并确认数量换算'})
@@ -260,10 +297,7 @@ def calculate(item, package=None):
     for key in ("sea_plan_qty", "air_plan_qty"):
         if fields[key] is not None and fields["quantity_step"] and fields["quantity_step"] > 0 and fields[key] % fields["quantity_step"]:
             errors.append({"field": key, "message": labels[key] + "不符合订货步长"})
-    base = str(item.get("material_name") or "") + str(item.get("material_type") or "")
-    hits = {group: [word for word in words if word.casefold() in (base + (str(item.get("material_abc") or "") if group == "maintenance" else "")).casefold()]
-            for group, words in package["keywords"].items()}
-    override = package.get("overrides", {}).get(str(item.get("material_code")))
+    hits, override = match_material_type(item, package)
     is_type = lambda key: override == key if override else bool(hits[key])
     small, manual, maintenance, dangerous, no_stock = (is_type(k) for k in ("small", "manual", "maintenance", "dangerous", "no_stock"))
     mode = "EXEMPT" if small else "MANUAL" if manual else "AUTO"
@@ -339,7 +373,7 @@ def calculate(item, package=None):
         if lower > upper:
             errors.append({"field": "rule", "message": "库存下限高于上限，请由规则负责人检查参数"})
     t, sea, air = (fields[k] for k in ("net_supply_before_plan", "sea_plan_qty", "air_plan_qty"))
-    additional_supply = fields["on_hand_qty"] if v3 else air
+    additional_supply = fields["on_hand_qty"] if v3 and not corrected_v3(package) else air
     base_supply = t + additional_supply if t is not None and additional_supply is not None else None
     future = base_supply + sea if base_supply is not None and sea is not None else None
     status, gap, feasible, sea_l, sea_u, suggested, residual = "UNAVAILABLE", None, None, None, None, None, None
@@ -368,6 +402,7 @@ def calculate(item, package=None):
             timing["advice"] += "；" + timing["turnover_warning"] + "预警"
     return {
         **timing,
+        **({'v3_revision': V3_REVISION} if corrected_v3(package) else {}),
         **({'master_basis': master_basis} if master_basis else {}),
         "data_status": "ERROR" if errors else "WARNING" if warnings or "MISSING_RATE" in flags else "VALID",
         "review_mode": mode, "quantity_status": status, "rule_id": rule_id,

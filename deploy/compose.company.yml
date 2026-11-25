@@ -6,6 +6,8 @@ services:
     extends: {file: compose.yml, service: web}
     environment:
       DEPLOY_ENV: company
+      PLAN_REVIEW_UMAMI_URL: ${PLAN_REVIEW_UMAMI_URL:-}
+      PLAN_REVIEW_UMAMI_WEBSITE_ID: ${PLAN_REVIEW_UMAMI_WEBSITE_ID:-}
     networks:
       app-private: {}
       proxy-net:

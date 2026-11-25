@@ -47,7 +47,7 @@ function Test-PlanFrontend([string]$Directory) {
     try {
         $build = Get-Content -LiteralPath $manifest -Raw -Encoding utf8 | ConvertFrom-Json
         $expected = Get-Content -LiteralPath (Join-Path $projectPath 'frontend\package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        return $build.version -eq $expected.version -and $build.review_model -eq 'V3' -and $build.market_scope -eq 'EUROPE' -and $build.account_mode -eq 'managed' -and $build.ui_revision -eq 10
+        return $build.version -eq $expected.version -and $build.review_model -eq 'V3' -and $build.market_scope -eq 'EUROPE' -and $build.account_mode -eq 'managed' -and $build.ui_revision -eq 22
     }
     catch { return $false }
 }

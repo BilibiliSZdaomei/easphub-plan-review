@@ -10,8 +10,15 @@ from sqlalchemy import select
 from .db import User, Warehouse
 from .auth import valid_password
 from .roles import ROLE_NAMES
+from .account_email import normalize_email
 
 HEADERS = ['账号', '姓名', '初始密码', '角色', '授权仓库']
+ENGLISH_HEADERS = ['Username', 'Name', 'Initial password', 'Role', 'Authorized warehouses']
+HEADER_ALIASES = {name.casefold(): key for key, name in zip(HEADERS, ENGLISH_HEADERS)}
+EMAIL_HEADER = '通知邮箱'
+HEADER_ALIASES.update(dict.fromkeys(('notification email','email','email address','邮箱','收件邮箱'),EMAIL_HEADER))
+REQUIRED_HEADERS = frozenset(HEADERS[:-1])
+OPTIONAL_HEADERS = {'授权仓库',EMAIL_HEADER}
 MAX_ACCOUNTS = 100
 
 
@@ -25,7 +32,7 @@ def read_accounts(table):
     reader = csv.reader(StringIO(table, newline=''), delimiter='\t' if '\t' in first_line else ',',
                         strict=True)
     result = []
-    positions = list(range(len(HEADERS)))
+    columns = None
     first = True
     try:
         for fields in reader:
@@ -33,16 +40,24 @@ def read_accounts(table):
                 continue
             if first:
                 first = False
-                titles = [cell.strip() for cell in fields]
-                if set(titles) == set(HEADERS) and len(titles) == len(HEADERS):
-                    positions = [titles.index(label) for label in HEADERS]
+                titles = [HEADER_ALIASES.get(cell.strip().casefold(), cell.strip()) for cell in fields]
+                columns_present = set(titles)
+                if len(columns_present) == len(titles) and REQUIRED_HEADERS <= columns_present <= (REQUIRED_HEADERS|OPTIONAL_HEADERS):
+                    columns = titles
                     continue
             if len(result) >= MAX_ACCOUNTS:
                 raise HTTPException(422, '每批最多创建 100 个账号')
-            if len(fields) != len(HEADERS):
+            # A headerless row follows the template order. Old files have four or five columns.
+            order = columns or [*HEADERS,EMAIL_HEADER]
+            missing = order[len(fields):]
+            if len(fields)>len(order) or not set(missing)<=OPTIONAL_HEADERS:
                 result.append((reader.line_num, None))
             else:
-                result.append((reader.line_num, [fields[i] for i in positions]))
+                cells = dict(zip(order, fields))
+                values = [cells.get(column, '') for column in HEADERS]
+                if EMAIL_HEADER in cells or (columns and EMAIL_HEADER in columns):
+                    values.append(cells.get(EMAIL_HEADER,''))
+                result.append((reader.line_num, values))
     except csv.Error as exc:
         raise HTTPException(422, f'第 {reader.line_num} 行格式有误，请核对分隔符或引号') from exc
     if not result:
@@ -63,16 +78,16 @@ def inspect_accounts(db, admin, table):
     names = Counter(w.name for w in allowed)
     warehouse_aliases = {w.name:w.code for w in allowed if names[w.name] == 1}
     warehouse_aliases.update({w.code:w.code for w in allowed})
-    roles = {**{v:k for k,v in ROLE_NAMES.items()}, **{k:k for k in ROLE_NAMES}, '复审':'REVIEWER', '复审人员':'REVIEWER', '系统管理':'ADMIN'}
+    roles = {**{v:k for k,v in ROLE_NAMES.items()}, **{k:k for k in ROLE_NAMES}, '复审':'REVIEWER', '复审人员':'REVIEWER', '系统管理':'ADMIN', 'ADMINISTRATOR':'ADMIN'}
     logins = Counter(fields[0].strip() for _,fields in rows if fields)
     existing = set(db.scalars(select(User.username).where(User.username.in_([n for n in logins if len(n)<=80]))))
     preview, accounts = [], []
     for line,fields in rows:
         if fields is None:
             preview.append({'line':line,'username':'','name':'','roles':[],'warehouses':[],
-                            'issues':['需填写账号、姓名、初始密码、角色、授权仓库五列']})
+                            'issues':['请填写账号、姓名、初始密码和角色，授权仓库可留空']})
             continue
-        username, name, password, role_text, warehouse_text = fields
+        username, name, password, role_text, warehouse_text, *email_cell = fields
         username, name = username.strip(), name.strip()
         role_ids, valid_roles = grant_values(role_text, roles)
         warehouse_ids, valid_warehouses = grant_values(warehouse_text, warehouse_aliases)
@@ -89,9 +104,14 @@ def inspect_accounts(db, admin, table):
             issues.append('初始密码需为 6–200 位')
         if not valid_roles or len(role_ids)!=1:
             issues.append('请选择一个角色：计划员、复审员或管理员')
-        if not valid_warehouses:
+        if warehouse_text.strip() and not valid_warehouses:
             issues.append('请填写授权范围内的仓库名称或编码')
         public = {'username':username,'name':name,'roles':role_ids,'warehouses':warehouse_ids}
+        if email_cell:
+            try:
+                public['email'] = normalize_email(email_cell[0])
+            except ValueError as exc:
+                issues.append(str(exc))
         preview.append({**public, 'line':line, 'issues':issues})
         if not issues:
             accounts.append({**public, 'password':password})

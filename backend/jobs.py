@@ -5,15 +5,15 @@ import json
 import time
 import threading
 from sqlalchemy import select, or_, and_, update
-from .db import SessionLocal, Job, Version, Rule, Snapshot, DATA, now,NotificationEvent,Notification,User
+from .db import SessionLocal, Job, Version, Batch, Rule, Snapshot, DATA, now,NotificationEvent,Notification,User
 from .adapters import parse_file, FIELDS
-from .rules import calculate, serial, number
+from .rules import calculate, serial, number, V3_REQUIRED_SALES
 from .roles import has_role
 
 FILES=DATA/'files'
 FILES.mkdir(parents=True,exist_ok=True)
 
-from .exporting import export_workbook
+from .exporting import EXECUTION_FORMAT, execution_basis, export_workbook
 
 # Successful polling/processing progress, used only by the production probe.
 WORKER_PROGRESS = {}
@@ -51,14 +51,28 @@ def run_job(job_id):
         rule_id=payload.get('validation_rule_id') if kind=='import' else None
         rule=db.get(Rule,rule_id) if rule_id else None
         validation_package=rule.package if rule else None
+        if kind=='export' and 'execution' not in payload and payload.get('version_id'):
+            # Jobs queued before the upgrade still refer to a frozen revision and optional filtered rows.
+            version=db.get(Version,payload['version_id'])
+            metadata=payload.get('metadata') or {}
+            if version and version.state==metadata.get('版本状态') and version.revision==metadata.get('来源修订号'):
+                batch=db.get(Batch,version.batch_id)
+                payload['execution']=execution_basis(version.state,version.items,batch.current_id==version.id)
     try:
         if kind=='import':
             result=parse_upload(payload)
-            result['validation']=file_validation(result['items'],result['kind'],validation_package)
+            checks=file_validation(result['items'],result['kind'],validation_package)
+            existing={(issue['row'],issue['field']) for issue in result['issues']}
+            result['validation']=[]
+            for issue in checks:
+                if (issue['row'],issue['field']) not in existing:
+                    target=result['issues'] if issue['field'] in V3_REQUIRED_SALES else result['validation']
+                    target.append(issue)
+            result['issues'].sort(key=lambda issue:issue['row'])
         elif kind=='export':
-            content=export_workbook(payload)
+            content=export_workbook(payload, FILES)
             file_id=job_id+'.xlsx';tmp=FILES/(file_id+'.tmp');tmp.write_bytes(content);tmp.replace(FILES/file_id)
-            result={'file_id':file_id,'filename':payload['filename'],'rows':len(payload['items'])}
+            result={'file_id':file_id,'filename':payload['filename'],'rows':len(payload['items']),'execution_format':EXECUTION_FORMAT}
         else:raise ValueError('未知任务类型')
         with SessionLocal.begin() as db:
             job=db.get(Job,job_id);job.result=result;job.state='DONE';job.finished_at=now();job.error=None
@@ -74,6 +88,7 @@ def claim_job():
         return candidate.id if count else None
 
 def worker_loop(stop):
+    from .usage_retention import prune_if_due
     while not stop.is_set():
         try:
             deliver_notifications()
@@ -81,6 +96,7 @@ def worker_loop(stop):
             if job:run_job(job)
             else:stop.wait(.4)
             WORKER_PROGRESS[threading.get_ident()] = time.time()
+            prune_if_due()
         except Exception:
             stop.wait(1)
 
@@ -102,7 +118,8 @@ def deliver_notifications():
                     if not has_role(u,'REVIEWER') or u.id==p['owner']:continue
                 elif u.id!=p['owner']:continue
                 nid=hashlib.sha256((eid+u.id).encode()).hexdigest()[:32]
-                if not db.get(Notification,nid):db.add(Notification(id=nid,user_id=u.id,batch_id=p['batch_id'],warehouse=p['warehouse'],text=p['text']))
+                if not db.get(Notification,nid):db.add(Notification(id=nid,user_id=u.id,batch_id=p['batch_id'],warehouse=p['warehouse'],text=p['text'],
+                    occurred_at=event.created_at,kind=p.get('kind'),version_id=p.get('version_id')))
             event.state='DONE';event.error=None
         return True
     except Exception as e:
@@ -111,9 +128,14 @@ def deliver_notifications():
         return False
 
 def start_workers(count=2):
+    from .mail_delivery import delivery_loop
+    from .workflow_smtp import smtp_enabled
     stop=threading.Event();threads=[]
     for _ in range(count):
         t=threading.Thread(target=worker_loop,args=(stop,),daemon=True);t.start();threads.append(t)
+    if smtp_enabled():
+        mail_thread=threading.Thread(target=delivery_loop,args=(stop,),name='workflow-smtp',daemon=True)
+        mail_thread.start();threads.append(mail_thread)
     return stop,threads
 
 if __name__=='__main__':

@@ -1,0 +1,19 @@
+.brand-loading {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  background: var(--ea-canvas);
+  color: var(--ea-muted);
+  font: 400 14px/1.5 var(--ea-font);
+}
+
+.brand-loading img {
+  width: min(216px, 64vw);
+  height: auto;
+  display: block;
+}

@@ -7,12 +7,18 @@ from fastapi import HTTPException
 from sqlalchemy import select, delete
 from .db import User, LoginSession
 from .roles import account_role, has_role
+from .account_email import notification_email
+from .personas import SOURCE as AVATAR_SOURCE, REVISION as AVATAR_REVISION
 
 hasher=PasswordHasher()
 def hash_token(token): return hashlib.sha256(token.encode()).hexdigest()
 def public_user(user):
     assigned=account_role(user)
-    return {"id":user.id,"username":user.username,"name":user.name,"roles":[assigned] if assigned else [],"warehouses":user.warehouses,"active":user.active}
+    avatar=user.avatar
+    return {"id":user.id,"username":user.username,"name":user.name,"roles":[assigned] if assigned else [],
+            "warehouses":user.warehouses,"active":user.active,"email":user.email,"notification_email":notification_email(user),
+            "avatar_preset":avatar.preset if avatar else "blank","avatar_config":avatar.config if avatar else None,
+            "avatar_source":avatar.source if avatar else AVATAR_SOURCE,"avatar_revision":avatar.revision if avatar else AVATAR_REVISION}
 def login(db,username,password):
     user=db.scalar(select(User).where(User.username==username,User.active.is_(True)))
     try:

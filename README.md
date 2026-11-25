@@ -1,24 +1,26 @@
 # EASPhub 计划审核
 
-[下载 v2.2.0](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/tag/v2.2.0) · [操作手册](操作手册.md) · [服务器安装与升级](deploy/offline/部署说明.md)
+[下载 v2.3.0](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/tag/v2.3.0) · [操作手册](操作手册.md) · [服务器 Agent 部署与账号恢复](deploy/offline/服务器Agent.md) · [离线运维说明](deploy/offline/部署说明.md)
 
-欧洲仓库的备件补货计划审核。计划员可以直接导入本仓 V3 完整表，核对系统重算的库存区间和补货建议，带提醒提交复审。每版由一名复审员领取，可中途转交、逐行判断、退回修改，并导出终审核准的海运和空运量。
+欧洲仓库的备件补货计划审核。计划员可以直接导入本仓 V3 完整表，核对系统重算的库存区间和补货建议，带提醒提交复审。使用分析由管理员查看。平台支持中英文切换、逐行和批量决定、撤销与重做，并可通过公司 SMTP 发送节点邮件。每版由一名复审员领取，可中途转交、逐行判断、退回修改，并导出终审核准的海运和空运量。
 
 ## 公司服务器升级
 
+新服务器需要沿用团队原账号和密码时，请按[服务器 Agent 部署与账号恢复](deploy/offline/服务器Agent.md)领取账号配置，在首次启动时导入。已有服务器使用原状态目录升级。
+
 服务器需要 **Linux x86-64、Docker Engine、Docker Compose v2 和 flock**。离线包随附应用与 MySQL 8.4.8 镜像、Python 运行依赖、已编译的前端和三份 Excel 模板。公司同事用浏览器访问服务器的 `/apps/plan-review/`。
 
-下载[服务器离线包](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/download/v2.2.0/EASPhub-Plan-Review-v2.2.0-linux-amd64.tar.gz)和[校验清单](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/download/v2.2.0/SHA256SUMS.txt)，放在同一个**新的程序目录**。从此目录执行以下命令。已有安装继续使用原业务数据目录；下例使用发行包的默认目录。
+下载[服务器离线包](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/download/v2.3.0/EASPhub-Plan-Review-v2.3.0-linux-amd64.tar.gz)和[校验清单](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/download/v2.3.0/SHA256SUMS.txt)，放在同一个**新的程序目录**。从此目录执行以下命令。已有安装继续使用原业务数据目录；下例使用发行包的默认目录。
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf EASPhub-Plan-Review-v2.2.0-linux-amd64.tar.gz
+tar -xzf EASPhub-Plan-Review-v2.3.0-linux-amd64.tar.gz
 cd EASPhub-Plan-Review-Server
 sudo env STATE_DIR=/var/lib/easphub-plan-review sh server.sh install
 sudo env STATE_DIR=/var/lib/easphub-plan-review sh server.sh status
 ```
 
-原安装如自定义了 `STATE_DIR`，请将两条命令中的路径换成原值。首次安装会在指定目录创建独立数据库和初始管理员凭据。跨版本升级会暂停服务，先冷备原数据、附件、配置和密钥，再执行迁移。请预留备份空间，保留旧版程序目录用于恢复。默认冷备位置为 `/var/lib/easphub-plan-review.backups/`。HTTPS、域名和反向代理由服务器维护人员配置。
+原安装如自定义了 `STATE_DIR`，请将两条命令中的路径换成原值。首次安装会在指定目录创建数据库。显式提供账号配置时恢复原登录，普通空白安装生成初始管理员。跨版本升级会暂停服务，先冷备原数据、附件、配置和密钥，再执行迁移。请预留备份空间，保留旧版程序目录用于恢复。默认冷备位置为 `/var/lib/easphub-plan-review.backups/`。HTTPS、域名和反向代理由服务器维护人员配置。
 
 **升级后请核对两个业务设置。**
 
@@ -27,7 +29,7 @@ sudo env STATE_DIR=/var/lib/easphub-plan-review sh server.sh status
 
 ## Windows 工作电脑
 
-下载 [Windows x64 离线包](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/download/v2.2.0/PlanReview-v2.2.0-Windows-x64.zip)，完整解压到本机短路径，例如 `C:\Apps\PlanReview-2.2.0`。运行 `PlanReview-Windows-x64\Verify.cmd` 校验文件，再运行 `Start.cmd`。入口为 `http://127.0.0.1:3350/plan-review/`。首次初始化后运行 `Admin.cmd` 查看这台电脑生成的管理员凭据。
+下载 [Windows x64 离线包](https://github.com/BilibiliSZdaomei/easphub-plan-review/releases/download/v2.3.0/PlanReview-v2.3.0-Windows-x64.zip)，完整解压到本机短路径，例如 `C:\Apps\PlanReview-2.3.0`。运行 `PlanReview-Windows-x64\Verify.cmd` 校验文件，再运行 `Start.cmd`。入口为 `http://127.0.0.1:3350/plan-review/`。首次初始化后运行 `Admin.cmd` 查看这台电脑生成的管理员凭据。
 
 Windows 便携版同一 Windows 用户的数据目录为 `%LOCALAPPDATA%\EASPhubPlanReview\workspace`。更新时先关闭旧版，再启动新版；建议先备份该工作区。要处理公司服务器上的同一份计划，请使用公司的 HTTPS 入口。
 

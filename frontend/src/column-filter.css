@@ -1,0 +1,19 @@
+.column-filter-menu {
+  position: fixed; z-index: 60; width: 256px; max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px); overflow: auto; display: grid; gap: 10px;
+  padding: 12px; border: 1px solid var(--ea-border); border-radius: 12px;
+  background: var(--ea-base); color: var(--ea-ink); box-shadow: 0 6px 24px #151c2826;
+}
+.column-filter-heading,.column-filter-actions {display:flex; justify-content:space-between; align-items:center; gap:8px}
+.column-filter-heading {font-size:14px}
+.column-filter-menu .icon-button {width:26px; height:26px}
+.column-filter-menu :is(input:not([type=checkbox]),select) {width:100%; min-height:34px; font-size:13px}
+.column-filter-menu .filter-range {display:grid; grid-template-columns:1fr 1fr; gap:8px}
+.column-filter-menu .filter-range label {margin:0; gap:4px}
+.column-filter-menu .filter-choices {max-height:min(224px,30vh); overflow:auto; padding:1px}
+.column-filter-menu .filter-check {display:flex; flex-direction:row; align-items:center; gap:8px; padding:6px 3px; margin:0; cursor:pointer; font-size:13px; font-weight:400}
+.column-filter-menu .filter-check:hover {background:var(--ea-subtle)}
+.column-filter-menu .select-values {padding-bottom:9px; border-bottom:1px solid var(--ea-line)}
+.column-filter-actions {border-top:1px solid var(--ea-line);padding-top:10px}
+.page-capacity {display:flex;align-items:center;gap:6px}
+.page-capacity select {min-height:30px;padding-block:3px}

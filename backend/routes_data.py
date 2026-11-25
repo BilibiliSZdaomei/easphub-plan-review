@@ -15,8 +15,9 @@ from .auth import role, scope
 from .roles import has_role
 from .api_common import context, once
 from .jobs import FILES, parse_upload
-from .adapters import FIELDS, MAX_BYTES, PLAN_QUANTITIES, normalize
+from .adapters import FIELDS, ENGLISH_FIELDS, MAX_BYTES, PLAN_QUANTITIES, normalize
 from .template_assets import WORKBOOK_TEMPLATES, dated_v3_template
+from .workbook_language import english_workbook
 from .periods import period_info
 from .rules import fingerprint, number
 from . import services as svc
@@ -40,7 +41,8 @@ def snapshots(warehouse:str='',ctx=Depends(context,scope="function")):
 @router.get('/snapshots/{snapshot_id}/materials')
 def materials(snapshot_id:str,q:str='',ctx=Depends(context,scope="function")):
     db,user=ctx;s=db.get(Snapshot,snapshot_id);svc.demand(s is not None,'快照不存在',404);scope(user,s.warehouse)
-    return [{'material_code':i['material_code'],'material_name':i.get('material_name',''),'net_supply_before_plan':i.get('net_supply_before_plan')} for i in s.items if q.casefold() in (i['material_code']+' '+(i.get('material_name') or '')).casefold()][:100]
+    return [{'material_code':i['material_code'],'material_name':i.get('material_name',''),'net_supply_before_plan':i.get('net_supply_before_plan'),
+             'current_sales':i.get('current_sales'), 'shortage_qty':i.get('shortage_qty')} for i in s.items if q.casefold() in (i['material_code']+' '+(i.get('material_name') or '')).casefold()][:100]
 
 @router.get('/mappings')
 def mappings(ctx=Depends(context,scope="function")):
@@ -86,6 +88,20 @@ def job_access(db,user,job_id):
     published=j.kind=='import' and j.payload.get('kind')!='plan' and j.committed_id and db.get(Snapshot,j.committed_id)
     may_read_published=bool(published and has_role(user,'REVIEWER'))
     svc.demand(j.user_id==user.id or has_role(user,'ADMIN') or may_read_published,'没有该文件任务权限',403)
+    if j.kind == 'export' or j.payload.get('kind') == 'plan':
+        batch_id = j.payload.get('batch_id')
+        version_id = j.payload.get('version_id') or (j.committed_id if j.kind == 'import' else None)
+        # Older exports can retain the batch number only.
+        number = (j.payload.get('metadata') or {}).get('批次') if j.kind == 'export' else None
+        if not batch_id and version_id:
+            batch_id = db.scalar(select(Version.batch_id).where(Version.id == version_id))
+        elif not batch_id and number:
+            batch_id = db.scalar(select(Batch.id).where(Batch.number == number))
+        if batch_id:
+            svc.batch_access(db, user, batch_id)
+        else:
+            unbound_upload = j.kind == 'import' and not version_id
+            svc.demand(unbound_upload and j.user_id == user.id, '无法确认该文件的计划权限', 403)
     return j
 
 def checked_import_result(job):
@@ -116,7 +132,12 @@ def get_job(job_id:str,ctx=Depends(context,scope="function")):
 def download(job_id:str,ctx=Depends(context,scope="function")):
     db,user=ctx;j=job_access(db,user,job_id)
     svc.demand(j.state=='DONE','文件尚未准备好',409)
-    if j.kind=='export':file_id=j.result['file_id'];filename=j.result['filename']
+    if j.kind=='export':
+        from .exporting import EXECUTION_FORMAT, old_export_requires_refresh
+        old_approved=j.result.get('execution_format')!=EXECUTION_FORMAT and (j.payload.get('metadata') or {}).get('版本状态')=='APPROVED'
+        version=db.get(Version,j.payload['version_id']) if old_approved and j.payload.get('version_id') else None
+        svc.demand(not old_export_requires_refresh(j.payload,j.result,version),'此文件按旧规则生成，请在计划页重新导出。',409)
+        file_id=j.result['file_id'];filename=j.result['filename']
     else:file_id=j.payload['file_id'];filename=j.payload['filename']
     file=FILES/file_id;svc.demand(file.is_file(),'文件缺失，请联系管理员',404)
     if j.kind=='export' and j.payload.get('version_id'):
@@ -149,6 +170,7 @@ def commit_import(job_id:str,data:dict,request:Request,ctx=Depends(context,scope
             role(user,'PLANNER');batch,ver=svc.version_access(db,user,data.get('version_id'));svc.editable(user,batch,ver,data.get('revision'))
             svc.demand(batch.warehouse==j.warehouse,'导入仓库与计划仓库不一致')
             svc.demand(not j.payload.get('version_id') or j.payload['version_id']==ver.id,'该文件属于其他计划版本')
+            undo_before=svc.plan_undo.capture(ver)
             full=result.get('plan_format') in ('legacy','v2','v3')
             mode=data.get('mode','replace')
             svc.demand(mode in ('replace','update_quantities') and not (full and mode=='update_quantities'),'导入方式与文件不符')
@@ -162,6 +184,7 @@ def commit_import(job_id:str,data:dict,request:Request,ctx=Depends(context,scope
                 imported_formulas = dict(plan.get('source_formulas') or {})
                 if full:
                     inp={**deepcopy(plan),'reference_origin':'plan_file'}
+                    svc.require_current_sales(inp, rule.package, plan['source']['row'])
                     for key in ('reason_code','reason','air_reason'):
                         if key in old.get('input',{}):
                             inp[key]=old['input'][key]
@@ -197,6 +220,7 @@ def commit_import(job_id:str,data:dict,request:Request,ctx=Depends(context,scope
                 svc.demand(len(rows)<=10000,'单批最多10000行')
             if full: ver.snapshot_id=None
             ver.items=rows;batch.updated_at=now();j.committed_id=ver.id;db.flush()
+            svc.plan_undo.record(db,user,ver,undo_before,'导入计划')
             audit(db,user,'确认计划导入',j.warehouse,batch.id,ver.id,job_id=j.id,rows=len(rows))
             return {'version_id':ver.id,'revision':ver.revision}
         role(user,import_role(kind))
@@ -230,6 +254,11 @@ def commit_import(job_id:str,data:dict,request:Request,ctx=Depends(context,scope
             mapping_record=db.get(Mapping,data['mapping_id'])
             svc.demand(mapping_record is not None and mapping_record.warehouse==j.warehouse,'映射不属于该仓库')
             svc.demand(mapping_record.config==j.payload.get('mapping'),'已保存映射与本次实际使用的映射不一致')
+        if kind in ('standard','v3','v2','legacy'):
+            active = svc.active_rule(db,j.warehouse,required=False)
+            if active:
+                for inp in items:
+                    svc.require_current_sales(inp, active.package, inp['source']['row'])
         if mode=='COMPONENTS':
             for inp in items:
                 for key in ('on_hand_qty','in_transit_qty','on_order_qty','demand_deduction_qty'):
@@ -252,7 +281,7 @@ def commit_import(job_id:str,data:dict,request:Request,ctx=Depends(context,scope
     return once(db,user,request,data,do)
 
 @router.get('/template')
-def template(kind:str='plan',version_id:str='',period:str='',ctx=Depends(context,scope="function")):
+def template(kind:str='plan',version_id:str='',period:str='',ctx=Depends(context,scope="function"),lang:str='zh'):
     if kind=='v3':
         if version_id:
             db,user=ctx
@@ -265,15 +294,19 @@ def template(kind:str='plan',version_id:str='',period:str='',ctx=Depends(context
             else:
                 svc.demand(period,'旧计划缺少标准周期，请选择模板月份')
         period=period or date.today().isoformat()[:7]
-        content=dated_v3_template(period)
-        filename=quote(f'计划审核V3模板_{period}.xlsx')
+        content=dated_v3_template(period,lang)
+        filename=quote(f'Plan-review-V3-{period}.xlsx' if lang=='en' else f'计划审核V3模板_{period}.xlsx')
         return Response(content,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                         headers={'Content-Disposition':f"attachment; filename*=UTF-8''{filename}",'Cache-Control':'private, no-store'})
     if kind in WORKBOOK_TEMPLATES:
         asset, filename = WORKBOOK_TEMPLATES[kind]
+        if kind=='plan' and lang=='en':
+            return Response(english_workbook(asset,asset.stat().st_mtime_ns),
+                            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                            headers={'Content-Disposition':'attachment; filename="Plan-quantity-update.xlsx"'})
         return FileResponse(asset, filename=filename,
                             media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    buf=StringIO();w=csv.writer(buf);w.writerow(FIELDS.values())
+    buf=StringIO();w=csv.writer(buf);w.writerow([ENGLISH_FIELDS[key] if lang=='en' else label for key,label in FIELDS.items()])
     return Response('\ufeff'+buf.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename="standard-data-template.csv"'})
 
 @router.post('/exports')
@@ -298,12 +331,19 @@ def export(data:dict,request:Request,ctx=Depends(context,scope="function")):
         snap=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None
         rule=db.get(Rule,ver.rule_id)
         job=Job(id=uid(),kind='export',user_id=user.id,warehouse=batch.warehouse,payload={'batch_id':batch.id,'version_id':ver.id,'filtered':filtered,'items':deepcopy(rows),'rule_package':deepcopy(rule.package),'filename':f"计划审核_{market_tag}{batch.number}_V{ver.seq}_{'筛选结果' if filtered else '完整版本'}.xlsx",'metadata':{'市场':MARKET_NAMES.get(market,warehouse.market),'市场编码':warehouse.market,'仓库':warehouse.name,'仓库编码':warehouse.code,'批次':batch.number,'计划周期':batch.period,'计划周期说明':svc.batch_json(db,batch)['period_info']['label'],'筛选条件':json.dumps({'q':data.get('q',''),'filter':data.get('filter','all'),'columns':data.get('column_filters',{})},ensure_ascii=False) if filtered else '完整版本','排序':order,'版本':ver.seq,'版本状态':ver.state,'导出范围':'筛选结果' if filtered else '完整版本','规则版本':ver.rule_id,'审核标准名称':rule.name,'数据快照':ver.snapshot_id,'数据快照名称':snap.name if snap else None,'计划自带基础数据行数':sum(bool(row['input'].get('reference_origin')) for row in rows),'来源修订号':ver.revision,'导出人':user.name,'导出时间':now(),'精度版本':rule.package['precision_version'],'数据日期':snap.as_of if snap else None,'来源口径':snap.basis if snap else None,'规则参数':json.dumps({k:v for k,v in rule.package.items() if k!='master_data'},ensure_ascii=False),'标准物料数':len((rule.package.get('master_data') or {}).get('items',{})),'提交计算时间':ver.submitted_at or ver.created_at}})
+        from .export_layout import export_layout_reference
+        job.payload['layout'] = export_layout_reference(db, ver, batch.warehouse, snap)
+        if ver.state == 'RETURNED':
+            returned = db.scalar(select(Audit).where(Audit.version_id==ver.id,Audit.action=='退回修改').order_by(Audit.created_at.desc()).limit(1))
+            if returned and returned.detail.get('reason'):
+                job.payload['metadata']['整单退回备注'] = returned.detail['reason']
         if snap:
             job.payload['net_mode'] = snap.net_mode
         if ver.reviewer_name:
             job.payload['metadata']['复审负责人']=ver.reviewer_name
-        outcome={'APPROVED':'全部通过','REJECTED':'全部不批准','PARTIALLY_APPROVED':'部分通过'}.get(ver.state)
-        if outcome:
-            job.payload['metadata']['终审结果']=outcome
+        from .exporting import execution_basis
+        job.payload['execution'] = execution_basis(ver.state,ver.items,batch.current_id==ver.id)
+        if ver.state=='PARTIALLY_APPROVED':
+            job.payload['filename']='历史结案（旧规则）_'+job.payload['filename']
         db.add(job);audit(db,user,'创建导出',batch.warehouse,batch.id,ver.id,job_id=job.id,rows=len(rows),filtered=filtered);return {'id':job.id}
     return once(db,user,request,data,do)

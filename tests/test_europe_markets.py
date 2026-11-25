@@ -80,7 +80,7 @@ def test_v2_workflow_for_all_ten_markets(clients):
             output,filename=results_file(planner,version['id'])
             meta=dict(output['版本与来源'].values)
             assert (meta['市场'],meta['仓库编码'])==(warehouse['market_name'],code)
-            assert output.active['F2'].value==net+5 and warehouse['market'] in filename
+            assert output['计划审核结果']['F2'].value==net+5 and warehouse['market'] in filename
             output.close()
         book.close()
 

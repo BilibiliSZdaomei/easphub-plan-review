@@ -1,0 +1,99 @@
+{
+  "source": "draftbit-personas",
+  "commit": "7b5234c44b3cef49d483b1462398bc9ea07bfa12",
+  "license": "MIT",
+  "layers": {
+    "plan": [
+      [
+        "Background",
+        "E5E0F3"
+      ],
+      [
+        "Skin",
+        "E6AA8A"
+      ],
+      [
+        "Shortcombover",
+        "423E46"
+      ],
+      [
+        "BodyRound",
+        "8C7EAC"
+      ],
+      [
+        "MouthSmile",
+        "000000"
+      ],
+      [
+        "NoseSmallround",
+        "E6AA8A"
+      ],
+      [
+        "EyesGlasses",
+        "000000"
+      ]
+    ],
+    "parts": [
+      [
+        "Background",
+        "DFE8E3"
+      ],
+      [
+        "Skin",
+        "C88970"
+      ],
+      [
+        "Curlybun",
+        "3E3537"
+      ],
+      [
+        "BodySquare",
+        "7C958C"
+      ],
+      [
+        "MouthSmile",
+        "000000"
+      ],
+      [
+        "NoseMediumround",
+        "C88970"
+      ],
+      [
+        "EyesWink",
+        "000000"
+      ]
+    ],
+    "order": [
+      [
+        "Background",
+        "EAE2DD"
+      ],
+      [
+        "Skin",
+        "E6B498"
+      ],
+      [
+        "Bobcut",
+        "51403E"
+      ],
+      [
+        "BodyOval",
+        "A98F84"
+      ],
+      [
+        "MouthBigsmile",
+        "000000"
+      ],
+      [
+        "NoseSmallround",
+        "E6B498"
+      ],
+      [
+        "EyesSideeye",
+        "000000"
+      ]
+    ]
+  },
+  "composition": "Worker composeSvg order / SvgLoader.res functions; stable local demo personas, no real staff identity.",
+  "modifications": "Fixed colors and configurations; SVG IDs prefixed per layer. Source geometry preserved."
+}

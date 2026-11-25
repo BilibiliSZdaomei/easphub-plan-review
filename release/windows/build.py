@@ -141,11 +141,12 @@ def build(args):
                     if actual != entry.hash.value:
                         raise ValueError(f'Installed wheel file changed: {name}/{entry}')
                     add_file(z, path, 'runtime/Lib/site-packages/'+entry.as_posix())
-            for file in ('alembic.ini','deploy/warehouses.example.json','scripts/prepare_desktop.py','scripts/bootstrap.py'):
+            for file in ('alembic.ini', 'deploy/warehouses.example.json', 'scripts/prepare_desktop.py',
+                         'scripts/bootstrap.py', 'scripts/restore_accounts.py'):
                 add_file(z, source/file, file)
             for path in sorted((source/'backend').glob('*.py')):
                 add_file(z,path,path.relative_to(source))
-            for filename in ('plan-review-v2.xlsx', 'plan-review-v3.xlsx', 'replenishment-plan.xlsx'):
+            for filename in ('plan-review-v2.xlsx', 'plan-review-v3.xlsx', 'replenishment-plan.xlsx', 'workbook-en.json'):
                 template = source/'backend'/'templates'/filename
                 add_file(z,template,template.relative_to(source))
             for path in sorted((source/'migrations').rglob('*')):
@@ -163,7 +164,7 @@ def build(args):
                 add_file(z,launcher/filename,filename,windows_text=True)
             add_file(z,launcher/'Verify.cmd','Verify.cmd',windows_text=True)
             add_file(z,launcher/'Admin.cmd','查看初始管理员.cmd',windows_text=True)
-            for filename in ('start.ps1','verify-package.ps1','runtime.ps1','portable-server.py'):
+            for filename in ('start.ps1','verify-package.ps1','runtime.ps1','portable-server.py','restore-accounts.ps1'):
                 add_file(z,launcher/filename,'scripts/'+filename,windows_text=filename.endswith('.ps1'))
             z.writestr(prefix+'versions.json',json.dumps({
                 'version':args.version,'platform':'windows-x64','python':PYTHON_VERSION,

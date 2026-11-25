@@ -52,7 +52,7 @@ def test_review_decision_filter_and_selection_use_the_displayed_version(clients)
         assert {row['id'] for row in payload['items']}==row_ids
         assert payload['metadata']['排序']=='计划原顺序'
         workbook=load_workbook(BytesIO(export_workbook(payload)),data_only=True)
-        assert {row[16] for row in list(workbook.active.values)[1:]}=={'未提交'}
+        assert {row[16] for row in list(workbook["计划审核结果"].values)[1:]}=={'未提交'}
         workbook.close()
     assert post(planner,path+'/submit',{'revision':draft['revision']}).status_code==200
     result=claim(reviewer,path)
@@ -62,10 +62,19 @@ def test_review_decision_filter_and_selection_use_the_displayed_version(clients)
     check(reviewer,path,'已批准',{first})
     second=next(i for i in row_ids if i!=first)
     returned=post(reviewer,path+'/return',{'revision':reviewed['revision'],'reason':'调整数量','ids':[second]}).json()
-    check(reviewer,path,'未复审',row_ids-{first,second})
-    check(reviewer,path,'退回修改',{second})
+    check(reviewer,path,'未复审',row_ids-{first})
+    check(reviewer,path,'退回修改',set())
     check(reviewer,path,'已批准',{first})
-    check(planner,'/versions/'+returned['version_id'],'未提交',row_ids-{first})
+    next_path='/versions/'+returned['version_id']
+    check(planner,next_path,'未提交',row_ids-{first,second})
+    needs_edit=check(planner,next_path,'需修改',{second})
+    job=post(planner,'/exports',{'version_id':returned['version_id'],'scope':'filtered','column_filters':needs_edit}).json()
+    with SessionLocal() as db:
+        exported=db.get(Job,job['id']).payload
+        assert [r['id'] for r in exported['items']]==[second]
+        workbook=load_workbook(BytesIO(export_workbook(exported)),data_only=True)
+        assert list(workbook["计划审核结果"].values)[1][16]=='需修改'
+        workbook.close()
     assert decision_label(None,'VOID')=='未复审'
     assert decision_label({'status':'BATCH_APPROVED'},'APPROVED')=='整批通过'
     assert decision_label({'status':'EXCEPTION_APPROVED'},'RETURNED')=='例外批准'
@@ -87,6 +96,10 @@ def test_whole_batch_filter_sort_paging_selection_export(clients):
         inp=row(material_code=f'T-{n:03}',sea_plan_qty=str(n),is_key_model=n%2==0)
         items.append({'id':str(n),'input':inp,'result':calculate(inp),'decision':None})
     with SessionLocal.begin() as db:db.get(Version,v['id']).items=items
+    for capacity in (15,50,100,300,500,1000,10000):
+        listing=p.get(P+'/versions/'+v['id'],params={'page_size':capacity,'table_view':'true'}).json()
+        assert listing['page_size']==capacity and len(listing['items'])==min(capacity,len(items))
+        assert listing['items'][0]['table_values']['material_code']==items[0]['input']['material_code']
     conditions={'sea_plan_qty':{'min':'8','max':'122'},'is_key_model':{'values':['是']}}
     query={'column_filters':json.dumps(conditions),'sort_key':'sea_plan_qty','sort_direction':'desc','page_size':20}
     results=[p.get(P+'/versions/'+v['id'],params={**query,'page':n}).json() for n in (1,2,3)]
@@ -115,6 +128,50 @@ def test_sort_nulls_and_filter_missing_not_zero():
     assert [r['id'] for r in query_items(rows,sort_key='fleet_qty',sort_direction='desc')]==[3,0,2,1,4]
     assert [r['id'] for r in query_items(rows,column_filters={'fleet_qty':{'blank':'only'}})]==[1,4]
     assert [r['id'] for r in query_items(rows,column_filters={'fleet_qty':{'min':0,'max':0}})]==[2]
+
+def test_english_text_filter_uses_displayed_advice_and_manual_checks():
+    source = row(material_code='CH-1', air_plan_qty='1')
+    result = calculate(source)
+    result['advice'] = '备货多，建议减少1,200.5pcs；建议延迟补货'
+    items = [{'id':'item', 'input':source, 'result':result}]
+
+    def found(key, term, lang='en', op='contains'):
+        rule = {'term':term, 'op':op}
+        if lang:
+            rule['lang'] = lang
+        return bool(query_items(items, column_filters={key:rule}))
+
+    assert found('attention', 'AIR FREIGHT')
+    assert found('advice', 'Excess stock. Reduce by 1,200.5 pcs; Delay replenishment', op='eq')
+    assert found('advice', 'delay', op='not_contains') is False
+    assert found('advice', '建议延迟', lang=None)
+    with pytest.raises(HTTPException):
+        found('material_name', 'anything')
+    with pytest.raises(HTTPException):
+        found('advice', 'test', lang='unsupported')
+
+
+def test_excel_filter_conditions_and_dependent_choices():
+    items=[]
+    for idx,(code,qty,status) in enumerate([('Ab-01','2','APPROVED'),('AB-02','0','REJECTED'),('CB-02',None,'BATCH_APPROVED')]):
+        inp=row(material_code=code,fleet_qty=qty)
+        items.append({'id':idx,'input':inp,'result':calculate(inp),'decision':{'status':status}})
+    def ids(key,rule):
+        return [r['id'] for r in query_items(items,column_filters={key:rule})]
+    for op,term,expected in [('contains','b-',[0,1,2]),('not_contains','ab',[2]),('eq','ab-02',[1]),('ne','ab-02',[0,2]),('starts','aB',[0,1]),('ends','02',[1,2])]:
+        assert ids('material_code',{'op':op,'term':term})==expected
+    for op,expected in [('eq',[1]),('ne',[0]),('gt',[0]),('ge',[0,1]),('lt',[]),('le',[1])]:
+        assert ids('fleet_qty',{'op':op,'term':0})==expected
+    assert ids('fleet_qty',{'blank':'only'})==[2]
+    assert ids('fleet_qty',{'blank':'exclude'})==[0,1]
+    assert ids('decision',{'values':['不批准','整批通过']})==[1,2]
+    items[1]['result'].update(delay_replenishment=True,turnover_warning='周转过高')
+    assert ids('status',{'values':['建议延迟补货','周转过高']})==[1]
+    facets={'decision':set(),'status':set()}
+    rows=query_items(items,column_filters={'material_code':{'op':'starts','term':'ab'},'decision':{'values':['不批准']}},facets=facets)
+    assert [r['id'] for r in rows]==[1]
+    assert facets['decision']=={'已批准','不批准'}
+    assert '建议延迟补货' in facets['status']
 
 
 def test_warnings_allow_submission_and_finalization_without_individual_confirmations(clients):
@@ -145,8 +202,9 @@ def test_warnings_allow_submission_and_finalization_without_individual_confirmat
     final=post(r,'/versions/'+vid+'/finalize',body);assert final.status_code==200,final.text
     final=r.get(P+'/versions/'+vid).json()
     assert final['state']=='APPROVED' and final['summary']['ERROR']==1
+    assert report['unreviewed_exception']==2 and report['exception_approved']==2
     for item in final['items']:
-        assert item['decision']['status']=='BATCH_APPROVED' and not item['decision']['ack_flags']
+        assert item['decision']['status']=='EXCEPTION_APPROVED' and item['decision']['batch'] and not item['decision']['ack_flags']
         assert item['decision']['reviewer_id'] and item['decision']['air_confirmed'] is False
     bad=next(x for x in final['items'] if x['result']['data_status']=='ERROR')
     assert not bad['decision'].get('data_error_accepted') and bad['input']['sea_plan_qty']=='?'
@@ -220,4 +278,4 @@ def test_exception_finalization_preserves_valid_decisions_and_covers_hidden_rows
     with SessionLocal() as db:
         rows=db.get(Version,vid).items
         assert rows[0]['decision']['status']=='APPROVED' and not rows[0]['decision'].get('forced')
-        assert all(x['decision']['status']=='BATCH_APPROVED' and x['decision']['reason']==body['reason'] for x in rows[1:])
+        assert all(x['decision']['status']=='EXCEPTION_APPROVED' and x['decision']['batch'] and x['decision']['reason']==body['reason'] for x in rows[1:])

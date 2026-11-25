@@ -1,0 +1,6 @@
+app_id: plan-review
+application:
+  version: '2.3.0'
+  repository: https://github.com/BilibiliSZdaomei/easphub-plan-review
+database:
+  schema_head: '0013'

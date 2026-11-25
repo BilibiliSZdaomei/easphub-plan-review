@@ -1,3 +1,5 @@
+import {systemText} from './i18n'
+import {tr} from './i18n'
 import {useEffect,useRef,useState,type KeyboardEvent,type PointerEvent,type RefObject} from 'react'
 
 const minimum=180
@@ -85,10 +87,10 @@ export function SidebarResize({shellRef,onCommit}:{
     e.preventDefault()
     onCommit(clamp(size))
   }
-  return <div className="sidebar-resize" role="separator" aria-label="调整侧栏宽度"
+  return <div className="sidebar-resize" role="separator" aria-label={systemText("调整侧栏宽度")}
     aria-controls="ea-app-navigation" aria-orientation="vertical" aria-valuenow={now}
-    aria-valuemin={minimum} aria-valuemax={maximum} aria-valuetext={now+' 像素'}
-    tabIndex={0} title="拖动调整宽度，或使用左右方向键"
+    aria-valuemin={minimum} aria-valuemax={maximum} aria-valuetext={tr(now+' 像素',now+' pixels')}
+    tabIndex={0} title={systemText("拖动调整宽度，或使用左右方向键")}
     onPointerDown={start} onPointerMove={move} onPointerUp={e=>{
       if(drag.current?.id===e.pointerId){move(e);end(e.currentTarget,false)}
     }}

@@ -8,7 +8,19 @@ action=${1:-install}
 die() { printf '%s\n' "$*" >&2; exit 1; }
 if [ "$(id -u)" != 0 ]; then die '请使用 sudo sh server.sh 运行。'; fi
 case "$state_dir" in /|*/../*|*/..|*/./*|*//*|*[!A-Za-z0-9_./-]*|'') die 'STATE_DIR 须为专用绝对路径。';; /*) ;; *) die 'STATE_DIR 需要绝对路径。';; esac
-case "$action" in install|start|stop|status|logs) ;; *) die '支持 install、start、stop、status、logs。';; esac
+case "$action" in install|start|stop|status|logs|restore-accounts) ;; *) die '支持 install、start、stop、status、logs、restore-accounts。';; esac
+account_bundle=''
+account_key=''
+case "$action" in
+    install|restore-accounts)
+        if [ "$#" -eq 3 ]; then
+            account_bundle=$2
+            account_key=$3
+            [ -f "$2" ] && [ -s "$2" ] && [ -f "$3" ] && [ -s "$3" ] && [ "$2" != "$3" ] || die '请分别提供已有的加密账号包和独立密钥文件。'
+        elif [ "$#" -gt 1 ] || [ "$action" = restore-accounts ]; then
+            die '用法：sudo sh server.sh install [账号包 密钥文件]；或者 sudo sh server.sh restore-accounts 账号包 密钥文件'
+        fi ;;
+esac
 command -v docker >/dev/null && docker compose version >/dev/null || die '请先安装 Docker Engine 和 Compose v2。'
 case "$(docker info --format '{{.OSType}}/{{.Architecture}}')" in linux/x86_64|linux/amd64) ;; *) die '需要 Linux x86_64 Docker Engine。';; esac
 marker="$state_dir/.plan-review-offline"
@@ -26,6 +38,12 @@ fi
 exec 9>"$state_dir/.operation.lock"
 flock 9
 compose() {
+    if grep -Eq '^PLAN_REVIEW_SMTP_HOST=.+' "$config"; then
+        if grep -Eq '^PLAN_REVIEW_SMTP_USER=.+' "$config"; then
+            set -- -f "$release_dir/deploy/compose.smtp-auth.yml" "$@"
+        fi
+        set -- -f "$release_dir/deploy/compose.smtp.yml" "$@"
+    fi
     docker compose --project-name easphub-plan-review-company --env-file "$config" \
         -f "$release_dir/deploy/compose.company.yml" -f "$release_dir/deploy/offline.yml" "$@"
 }
@@ -71,6 +89,26 @@ backup_before_upgrade() {
         die '冷备失败；数据库未迁移。请核对备份空间和读取权限。'
     fi
 }
+restore_accounts() {
+    key_size=$(wc -c < "$account_key")
+    [ "$key_size" -le 65536 ] || die '密钥文件大小无效。'
+    # Pipe the host files into the non-root container. Temporary copies live only in tmpfs.
+    { printf '%s\n' "$key_size"; cat -- "$account_key" "$account_bundle"; } | compose run --rm --no-deps -T migrate python -c '
+import shutil, subprocess, sys, tempfile
+from pathlib import Path
+stream = sys.stdin.buffer
+size = int(stream.readline(16))
+if not 0 < size <= 65536:
+    raise SystemExit("Invalid key length")
+with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+    key = Path(directory) / "accounts.key"
+    bundle = Path(directory) / "accounts.easphub"
+    key.write_bytes(stream.read(size))
+    with bundle.open("wb") as out:
+        shutil.copyfileobj(stream, out)
+    sys.exit(subprocess.call([sys.executable, "scripts/restore_accounts.py", "restore", "--key-file", str(key), "--bundle", str(bundle)]))
+'
+}
 random_secret() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
 create_secret() {
     f="$1"
@@ -96,7 +134,7 @@ if [ "$action" = install ]; then
             chmod 444 "$state_dir/secrets/mysql_client.new"
             mv "$state_dir/secrets/mysql_client.new" "$state_dir/secrets/mysql_client"
         fi
-        if [ ! -f "$state_dir/secrets/initial-admin-password" ]; then
+        if [ -z "$account_bundle" ] && [ ! -f "$state_dir/secrets/initial-admin-password" ]; then
             random_secret > "$state_dir/secrets/initial-admin-password.new"
             chmod 400 "$state_dir/secrets/initial-admin-password.new"
             mv "$state_dir/secrets/initial-admin-password.new" "$state_dir/secrets/initial-admin-password"
@@ -112,6 +150,15 @@ DATABASE_ROOT_PASSWORD_FILE=$state_dir/secrets/database_root_password
 MYSQL_CLIENT_FILE=$state_dir/secrets/mysql_client
 PROXY_NETWORK=$proxy_network
 HTTP_PORT=$port
+# Optional company SMTP service; set the values and run server.sh start.
+PLAN_REVIEW_SMTP_HOST=
+PLAN_REVIEW_SMTP_FROM=
+PLAN_REVIEW_SMTP_MODE=starttls
+PLAN_REVIEW_SMTP_PORT=
+PLAN_REVIEW_SMTP_NETWORK=
+PLAN_REVIEW_PUBLIC_URL=
+PLAN_REVIEW_SMTP_USER=
+PLAN_REVIEW_SMTP_PASSWORD_HOST_FILE=
 ENV
         mv "$config.new" "$config"
     fi
@@ -126,7 +173,10 @@ ENV
     fi
     compose up -d --wait --wait-timeout 300 database
     compose run --rm --no-deps -T migrate
-    admin_input="$state_dir/secrets/initial-admin-password"
+    if [ -n "$account_bundle" ]; then
+        restore_accounts
+    else
+        admin_input="$state_dir/secrets/initial-admin-password"
     [ -s "$admin_input" ] || admin_input=/dev/null
     compose run --rm --no-deps -T migrate python -c '
 from pathlib import Path
@@ -140,11 +190,16 @@ if not existing:
     bootstrap("admin", "系统管理员", sys.stdin.readline().strip(), warehouse_config())
     print("初始管理员已建立。")
 ' < "$admin_input"
+    fi
     compose up -d --wait --wait-timeout 300 database web worker
-    printf '%s\n' '服务已就绪。首次登录账号 admin，请由管理员读取本机密码文件。' "$state_dir/secrets/initial-admin-password"
+    printf '%s\n' '服务已就绪。'
+    if [ -z "$account_bundle" ] && [ -s "$state_dir/secrets/initial-admin-password" ]; then
+        printf '%s\n' '独立初始化的站点可由管理员读取初始密码文件。' "$state_dir/secrets/initial-admin-password"
+    fi
 else
     [ -f "$config" ] || die '配置缺失，请先运行 install。'
     case "$action" in
+        restore-accounts) restore_accounts ;;
         start) compose up -d --wait --wait-timeout 300 database web worker ;;
         stop) compose stop web worker database ;;
         status) compose ps ;;

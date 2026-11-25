@@ -1,10 +1,16 @@
-计划审核 2.2.0 · Windows x64 离线版
+计划审核 2.3.0 · Windows x64 离线版
 
 首次使用
-1. 从 GitHub Release 下载 PlanReview-v2.2.0-Windows-x64.zip，完整解压到本机可写的短路径目录，例如 C:\Apps\PlanReview。
+1. 从 GitHub Release 下载 PlanReview-v2.3.0-Windows-x64.zip，完整解压到本机可写的短路径目录，例如 C:\Apps\PlanReview。
 2. 双击 Start.cmd。保留运行窗口，浏览器会打开 http://127.0.0.1:3350/plan-review/ 。
 3. 同一 Windows 用户双击 Admin.cmd，复制初始密码，使用账号 admin 登录。可在个人菜单修改密码。
 4. 在「管理 → 人员与权限」给每人选一个角色并分配仓库。复审员或管理员可在「管理 → 数据中心」下载 V3 模板及导入业务文件。新环境含十个仓库、欧洲通用 V3 标准和一个本机管理员，业务计划与快照从空库开始。
+
+从已有账号配置首次启用
+1. 准备管理员单独交付的加密账号包和配套密钥。解压程序后，在首次运行 Start.cmd 前打开该目录的 PowerShell。
+2. 将以下两个示例路径替换为实际文件路径，然后运行
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\restore-accounts.ps1 -Bundle "D:\Private\accounts.easphub" -KeyFile "D:\Private\accounts.key"
+3. 看到恢复成功后双击 Start.cmd，使用原有账号和密码登录。已有数据的电脑先停止应用、备份 workspace；同一电脑常规升级直接共用原数据目录。
 
 日常使用
 • 启动时会校验解压后的程序文件，也可双击 Verify.cmd 单独检查。

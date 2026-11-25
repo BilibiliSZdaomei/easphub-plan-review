@@ -7,7 +7,6 @@ from .markets import EUROPE, LEGACY_DEFAULT, EUROPE_RULE_NAME, MARKET_NAMES, mar
 
 from secrets import token_urlsafe
 
-# Random login only for explicitly enabled synthetic test fixtures.
 DEMO_PASSWORD = token_urlsafe(24)
 def demo_items():
     base={"material_type":"车身件","material_abc":"A","local_abc":"B","is_key_model":True,"fleet_qty":"5926",

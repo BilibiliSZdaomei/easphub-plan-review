@@ -1,3 +1,5 @@
+import {systemText, warehouseName, tr} from './i18n'
+import WarehouseLabel,{WarehouseSelect} from './WarehouseLabel'
 import {useEffect, useRef, useState, type FormEvent} from 'react'
 import {ArrowLeft, Save} from 'lucide-react'
 import {api} from './api'
@@ -17,9 +19,16 @@ type Labels = Record<string,string>
 const keywordGroups: Labels = {small:'小件',maintenance:'保养件',dangerous:'危包',manual:'用品精品',no_stock:'不备货'}
 
 export function scopeLabel(rule:Rule, warehouses:Warehouse[]) {
-  if(rule.scope==='WAREHOUSE') return warehouses.find(w=>w.code===rule.scope_code)?.name || rule.scope_code
-  if(rule.scope==='MARKET') return (warehouses.find(w=>w.market===rule.scope_code)?.market_name || rule.scope_code)+'市场'
-  return rule.scope_code==='EUROPE'?'欧洲通用':'原默认范围'
+  if(rule.scope==='WAREHOUSE') return warehouseName(warehouses.find(w=>w.code===rule.scope_code)?.name || rule.scope_code)
+  if(rule.scope==='MARKET') {
+    const name = warehouses.find(w=>w.market===rule.scope_code)?.market_name || rule.scope_code
+    return tr(name+'市场', warehouseName(name)+' market')
+  }
+  return systemText(rule.scope_code==='EUROPE'?'欧洲通用':'原默认范围')
+}
+
+export function RuleScopeLabel({rule,warehouses}:{rule:Rule;warehouses:Warehouse[]}){
+ return <WarehouseLabel code={rule.scope==='WAREHOUSE'?rule.scope_code:undefined} market={rule.scope==='MARKET'?rule.scope_code:undefined} name={scopeLabel(rule,warehouses)}/>
 }
 
 export function initialSource(rules:Rule[], coverage:Record<string,string|null>, warehouse:string) {
@@ -50,16 +59,16 @@ export function RuleFields({pkg, warehouse, labels, overrides, disabled, onPacka
   return <>
     {pkg.model==='V3'&&<MasterFields key={warehouse||'shared'} config={pkg} warehouse={warehouse} disabled={disabled} onChange={patch=>onPackage({...pkg,...patch})}/>}
     <div className="parameter-grid">{Object.entries(labels).filter(([key])=>key in pkg.params).map(([key,label])=>
-      <label key={key}><span>{label}</span><input disabled={disabled} type="number" step="any" min="0" required
+      <label key={key}><span>{systemText(label)}</span><input disabled={disabled} type="number" step="any" min="0" required
         value={pkg.params[key]} onChange={e=>onPackage({...pkg,params:{...pkg.params,[key]:e.target.value}})} /></label>
     )}</div>
-    <details className="rule-details"><summary>特殊物料关键词</summary><p>按物料名称匹配，多个分类命中时标记为需关注。</p>
-      {Object.entries(pkg.keywords).map(([group,words])=><label key={group}>{keywordGroups[group]}
-        <textarea aria-label={keywordGroups[group]} disabled={disabled} value={words.join('、')} rows={2}
+    <details className="rule-details"><summary>{systemText("特殊物料关键词")}</summary><p>{systemText("按物料名称匹配，多个分类命中时标记为需关注。")}</p>
+      {Object.entries(pkg.keywords).map(([group,words])=><label key={group}>{systemText(keywordGroups[group]||group)}
+        <textarea aria-label={systemText(keywordGroups[group]||group)} disabled={disabled} value={words.join('、')} rows={2}
           onChange={e=>onPackage({...pkg,keywords:{...pkg.keywords,[group]:e.target.value.split(/[、,，\n]/)}})}/></label>)}
     </details>
-    <details className="rule-details"><summary>按物料号指定审核类型</summary><p>每行填写「物料号=类型」，支持 small、maintenance、dangerous、manual、no_stock、normal。</p>
-      <textarea aria-label="按物料号指定审核类型" className="full" disabled={disabled} rows={4} value={overrides} onChange={e=>onOverrides(e.target.value)}/>
+    <details className="rule-details"><summary>{systemText("按物料号指定审核类型")}</summary><p>{systemText("每行填写「物料号=类型」，支持 small、maintenance、dangerous、manual、no_stock、normal。")}</p>
+      <textarea aria-label={systemText("按物料号指定审核类型")} className="full" disabled={disabled} rows={4} value={overrides} onChange={e=>onOverrides(e.target.value)}/>
     </details>
   </>
 }
@@ -68,7 +77,7 @@ function initialValues(source:Rule) {
   const legacyDefault = source.scope==='DEFAULT' && source.scope_code!=='EUROPE'
   return {
     source,
-    name:source.name.slice(0,92)+' · 自定义',
+    name:source.name.slice(0,92)+tr(' · 自定义',' · Custom'),
     scope:legacyDefault?'':source.scope,
     code:legacyDefault?'':source.scope_code,
     pkg:structuredClone(source.package),
@@ -95,14 +104,14 @@ export default function CreateRule({initial, sources, warehouses, labels, v2Defa
     setError('')
   }
   function changeSource(id:string) {
-    if(dirty && !window.confirm('更换基础标准会重置本页修改，继续？')) return
+    if(dirty && !window.confirm(systemText('更换基础标准会重置本页修改，继续？'))) return
     const next=sources.find(r=>r.id===id)
     if(next){setForm(initialValues(next));setDirty(false);setError('')}
   }
   function changeCoverage(scope:string,code:string) {
     const changing=pkg.master_data && (scope!=='WAREHOUSE'||code!==pkg.master_data.warehouse)
     if(changing){
-      if(!window.confirm('新范围只带入审核规则，本仓物料主数据留在原仓。继续？'))return
+      if(!window.confirm(systemText('新范围只带入审核规则，本仓物料主数据留在原仓。继续？')))return
       const {master_data,...common}=pkg
       edit({scope,code,pkg:common})
     }else edit({scope,code})
@@ -140,37 +149,37 @@ export default function CreateRule({initial, sources, warehouses, labels, v2Defa
     finally {saving.current=false;setBusy(false)}
   }
   return <>
-    <button className="back-link" disabled={busy} onClick={close}><ArrowLeft size={15}/>返回审核标准</button>
-    <div className="page-heading"><h1>新建标准</h1></div>
+    <button className="back-link" disabled={busy} onClick={close}><ArrowLeft size={15}/>{systemText("返回审核标准")}</button>
+    <div className="page-heading"><h1>{systemText("新建标准")}</h1></div>
     <form className="panel new-standard" onSubmit={submit}>
-      <div className="panel-heading"><h2>基本信息</h2></div>
+      <div className="panel-heading"><h2>{systemText("基本信息")}</h2></div>
       <div className="parameter-grid new-standard-meta">
-        <label>基础标准<select disabled={busy} value={source.id} onChange={e=>changeSource(e.target.value)}>
-          {sources.map(r=><option key={r.id} value={r.id}>{r.name} · {scopeLabel(r,warehouses)}{r.active?'':' · 历史版本'}</option>)}
+        <label>{systemText("基础标准")}<select disabled={busy} value={source.id} onChange={e=>changeSource(e.target.value)}>
+          {sources.map(r=><option key={r.id} value={r.id}>{r.name} · {scopeLabel(r,warehouses)}{r.active?'':tr(' · 历史版本',' · Archived')}</option>)}
         </select></label>
-        <label>标准名称<input required maxLength={100} disabled={busy} value={form.name} onChange={e=>edit({name:e.target.value})}/></label>
-        <label>适用层级<select required disabled={busy} value={form.scope} onChange={e=>changeScope(e.target.value)}>
-          {!form.scope&&<option value="" disabled>请选择新标准的适用层级</option>}
-          {warehouses.some(w=>w.region==='EUROPE')&&<option value="DEFAULT">欧洲通用</option>}
-          <option value="MARKET">指定市场</option><option value="WAREHOUSE">指定仓库</option>
+        <label>{systemText("标准名称")}<input required maxLength={100} disabled={busy} value={form.name} onChange={e=>edit({name:e.target.value})}/></label>
+        <label>{systemText("适用层级")}<select required disabled={busy} value={form.scope} onChange={e=>changeScope(e.target.value)}>
+          {!form.scope&&<option value="" disabled>{systemText("请选择新标准的适用层级")}</option>}
+          {warehouses.some(w=>w.region==='EUROPE')&&<option value="DEFAULT">{systemText("欧洲通用")}</option>}
+          <option value="MARKET">{systemText("指定市场")}</option><option value="WAREHOUSE">{systemText("指定仓库")}</option>
         </select></label>
-        {form.scope && form.scope!=='DEFAULT'&&<label>适用范围<select required disabled={busy} value={form.code} onChange={e=>changeCoverage(form.scope,e.target.value)}>
-          <option value="" disabled>{form.scope==='MARKET'?'选择市场':'选择仓库'}</option>
-          {form.scope==='MARKET'?Array.from(markets,([code,label])=><option key={code} value={code}>{label}</option>):
-            warehouses.map(w=><option key={w.code} value={w.code}>{w.name}</option>)}
-        </select></label>}
-        {source.package.model!=='V3'&&<label>审核模型<select disabled={busy} value={pkg.model || '0804'} onChange={e=>changeModel(e.target.value)}>
+        {form.scope && form.scope!=='DEFAULT'&&<label>{systemText("适用范围")}<WarehouseSelect required disabled={busy} value={form.code} market={form.scope==='MARKET'?form.code:undefined} onChange={e=>changeCoverage(form.scope,e.target.value)}>
+          <option value="" disabled>{form.scope==='MARKET'?systemText("选择市场"):systemText("选择仓库")}</option>
+          {form.scope==='MARKET'?Array.from(markets,([code,label])=><option key={code} value={code}>{warehouseName(label)}</option>):
+            warehouses.map(w=><option key={w.code} value={w.code}>{warehouseName(w.name)}</option>)}
+        </WarehouseSelect></label>}
+        {source.package.model!=='V3'&&<label>{systemText("审核模型")}<select disabled={busy} value={pkg.model || '0804'} onChange={e=>changeModel(e.target.value)}>
           {source.package.model!=='V2'&&<option value="0804">0804</option>}<option value="V2">V2</option><option value="V3">V3</option>
         </select></label>}
       </div>
-      <div className="panel-heading"><h2>审核参数</h2></div>
+      <div className="panel-heading"><h2>{systemText("审核参数")}</h2></div>
       <RuleFields warehouse={form.scope==='WAREHOUSE'?form.code:undefined} pkg={pkg} labels={labels} disabled={busy} overrides={form.overrides}
         onPackage={pkg=>edit({pkg})} onOverrides={overrides=>edit({overrides})}/>
       {error&&<Notice tone="error" message={error}/>}
       <div className="rule-edit-footer">
-        <label>修改说明（选填）<input disabled={busy} maxLength={2000} value={form.note} onChange={e=>edit({note:e.target.value})}/></label>
-        <div className="actions"><button type="button" className="secondary" disabled={busy} onClick={close}>取消</button>
-          <button className="primary" disabled={busy || !form.name.trim() || !form.code}><Save size={15}/>{busy?'正在创建…':'创建草稿'}</button></div>
+        <label>{systemText("修改说明（选填）")}<input disabled={busy} maxLength={2000} value={form.note} onChange={e=>edit({note:e.target.value})}/></label>
+        <div className="actions"><button type="button" className="secondary" disabled={busy} onClick={close}>{systemText("取消")}</button>
+          <button className="primary" disabled={busy || !form.name.trim() || !form.code}><Save size={15}/>{busy?systemText("正在创建…"):systemText("创建草稿")}</button></div>
       </div>
     </form>
   </>

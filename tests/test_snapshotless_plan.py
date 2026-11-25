@@ -21,6 +21,26 @@ def assert_pending(row):
     assert row['input'].get('net_supply_before_plan') is None
 
 
+def test_pending_material_labels_use_version_standard_without_changing_quantities():
+    from backend.rules import default_package, pending_plan_result
+    from backend.table_query import table_item
+
+    source = {'material_code':'QA-MATERIAL', 'material_name':'测试件', 'sea_plan_qty':'2', 'air_plan_qty':'0'}
+    result = pending_plan_result(source)
+    result['master_basis'] = {'values':{'material_name':'固定螺栓', 'large_value_flag':'大金额、大体积'}}
+    row = {'id':'QA-ROW', 'input':source, 'result':result}
+    package = default_package()
+    for compact in (False, True):
+        display = table_item(row, 'DRAFT', compact, package)
+        assert display['result']['matched_keywords']['small'] == ['螺栓']
+        assert display['input']['large_value_flag'] == '大金额、大体积'
+        assert display['result']['data_status'] == 'PENDING'
+        assert display['table_values']['future_qty'] is None
+    package['overrides']['QA-MATERIAL'] = 'normal'
+    assert table_item(row, 'DRAFT', True, package)['result']['override'] == 'normal'
+    assert result['matched_keywords'] == {} and result['override'] is None
+
+
 def test_new_warehouse_can_plan_and_complete_manual_review(clients):
     uk, reviewer, _, planner = clients
     warehouse = 'DE_NSC'

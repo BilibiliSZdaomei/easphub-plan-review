@@ -37,7 +37,7 @@ def test_plan_upload_requires_one_explicit_transport_quantity(clients, full):
                 ','.join('' if value is None else str(value) for value in row) for row in records]), '数量.csv'
         book = load_workbook(BytesIO(planner.get(P+'/template?kind=v3').content))
         for row, (code, sea, air) in enumerate(records, 2):
-            for column, value in [('A', code), ('X', sea), ('Y', air)]:
+            for column, value in [('A', code), ('T', 0), ('U', 0), ('X', sea), ('Y', air)]:
                 book['审核表'][column+str(row)] = value
         stream = BytesIO()
         book.save(stream)
@@ -82,7 +82,7 @@ def test_planner_import_recalculate_and_review_without_shared_snapshot(clients):
     book=load_workbook(BytesIO(planner.get(P+'/template?kind=v3').content))
     sheet=book['审核表']
     for col,val in {'A':'P-1','B':'支架','F':'A','G':'Y','H':18000,'V':4,'W':0,'X':2,'Y':7,'Z':0.03,
-                    'AA':5,'AB':6,'L':123,'M':456,'AC':999,'AM':'旧建议','AN':'同意','AO':88,'AP':'同意','AQ':'旧签批'}.items():
+                    'T':4,'U':0,'AA':5,'AB':6,'L':123,'M':456,'AC':999,'AM':'旧建议','AN':'同意','AO':88,'AP':'同意','AQ':'旧签批'}.items():
         sheet[f'{col}2']=val
     for col,val in zip('NOPQRS',[0,1,2,3,4,5]): sheet[f'{col}2']=val
     file=BytesIO();book.save(file);book.close()
@@ -91,7 +91,7 @@ def test_planner_import_recalculate_and_review_without_shared_snapshot(clients):
     commit(job)
     state=draft(); row,=state['items']; inp=row['input']
     assert state['snapshot'] is None and state['summary']['plan_reference']==1 and state['summary']['PENDING']==0
-    assert row['result']['future_qty']=='6' and (inp['avg_sales_3m'],inp['avg_sales_6m'])==('4','2.5')
+    assert row['result']['future_qty']=='9' and (inp['avg_sales_3m'],inp['avg_sales_6m'])==('4','2.5')
     assert not row['decision'] and '旧签批' not in str(row) and inp['source']['file']=='本月计划.xlsx'
     def patch(client,revision,reference):
         return client.patch(P+path+'/items',json={'revision':revision,'changes':[{'id':row['id'],'reference':reference}]})
@@ -101,12 +101,12 @@ def test_planner_import_recalculate_and_review_without_shared_snapshot(clients):
     ok(patch(planner,state['revision'],{'on_hand_qty':'8','monthly_sales':[0,0,0,0,3,6]}))
     assert patch(planner,state['revision'],{'on_hand_qty':'4'}).status_code==409
     state=draft(); row,=state['items']
-    assert row['input']['avg_sales_3m']=='3' and row['result']['future_qty']=='10'
+    assert row['input']['avg_sales_3m']=='3' and row['result']['future_qty']=='9'
     commit(upload(planner,'plan',csvfile(['物料号,海运计划,空运计划','P-1,3,7'])))
     state=draft(); row,=state['items']
     assert row['input']['on_hand_qty']=='8' and row['input']['avg_sales_6m']=='1.5'
     assert row['input']['source']['file']=='本月计划.xlsx' and row['input']['plan_source']['file']=='data.csv'
-    assert row['result']['future_qty']=='11' and state['snapshot'] is None
+    assert row['result']['future_qty']=='10' and state['snapshot'] is None
     warnings=ok(planner.get(P+path+'/confirmation'))
     ok(post(planner,path+'/submit',{'revision':state['revision'],'issue_hash':warnings['issue_hash']}))
     assigned=claim(reviewer,path)
@@ -119,13 +119,14 @@ def test_planner_import_recalculate_and_review_without_shared_snapshot(clients):
     ok(planner.patch(P+next_path+'/items',json={'revision':next_state['revision'],
                     'changes':[{'id':row['id'],'values':{'sea_plan_qty':'1'},'reference':{'on_hand_qty':'6'}}]}))
     revised=ok(planner.get(P+next_path))
-    assert revised['items'][0]['result']['future_qty']=='7' and draft()['items'][0]['result']['future_qty']=='11'
+    assert revised['items'][0]['result']['future_qty']=='8' and draft()['items'][0]['result']['future_qty']=='10'
     submit=ok(planner.get(P+next_path+'/confirmation'))
     ok(post(planner,next_path+'/submit',{'revision':revised['revision'],'issue_hash':submit['issue_hash']}))
     assigned=claim(reviewer,next_path)
     ok(post(reviewer,next_path+'/reviews',{'revision':assigned['revision'],'ids':[row['id']],'decision':'APPROVED',
             'ack_flags':assigned['items'][0]['result']['manual_flags'],'air_confirmed':True,'reason':'已核对库存'}))
-    assert ok(planner.get(P+next_path))['items'][0]['decision']['status']=='APPROVED'
+    assert assigned['items'][0]['result']['quantity_status']=='ABOVE'
+    assert ok(planner.get(P+next_path))['items'][0]['decision']['status']=='EXCEPTION_APPROVED'
     assert snapshots()==original
 
 
@@ -136,10 +137,13 @@ def test_hand_entry_and_partial_rows_can_coexist(clients):
     ok(post(planner,path+'/items',{'revision':state['revision'],'items':[
         {'material_code':'HAND','sea_plan_qty':'3','reference':{'material_name':'前门支架','material_abc':'A',
             'is_key_model':True,'fleet_qty':'18000','on_hand_qty':'4','net_supply_before_plan':'0',
-            'monthly_sales':[0,1,2,3,4,5],'replacement_rate':'2%','replacement_target':5,'sales_target':6}},
-        {'material_code':'QTY','sea_plan_qty':'3'}]}))
+            'current_sales':0,'shortage_qty':0,'monthly_sales':[0,1,2,3,4,5],'replacement_rate':'2%','replacement_target':5,'sales_target':6}}]}))
+    state=ok(planner.get(P+path))
+    assert post(planner,path+'/items',{'revision':state['revision'],'items':[{'material_code':'QTY','sea_plan_qty':'3'}]}).status_code==422
+    job=upload(planner,'plan',csvfile(['物料号,海运计划,空运计划','QTY,3,']))
+    ok(post(planner,'/imports/'+job['id']+'/commit',{'version_id':state['id'],'revision':state['revision'],'mode':'update_quantities'}))
     state=ok(planner.get(P+path)); by_code={row['input']['material_code']:row for row in state['items']}
-    assert by_code['HAND']['result']['future_qty']=='7' and by_code['HAND']['input']['replacement_rate']=='0.02'
+    assert by_code['HAND']['result']['future_qty']=='3' and by_code['HAND']['input']['replacement_rate']=='0.02'
     assert by_code['QTY']['result']['basis_pending'] and state['summary']['PENDING']==1
     assert state['summary']['plan_reference']==1 and state['snapshot'] is None
     job=upload(planner,'plan',csvfile(['物料号,海运计划,空运计划','HAND,6,0','NEW,1,0']))
@@ -147,7 +151,10 @@ def test_hand_entry_and_partial_rows_can_coexist(clients):
     updated=ok(planner.get(P+path))
     by_code={row['input']['material_code']:row for row in updated['items']}
     assert set(by_code)=={'HAND','QTY','NEW'} and updated['summary']['PENDING']==2
-    assert by_code['HAND']['result']['future_qty']=='10' and by_code['QTY']['input']['sea_plan_qty']=='3'
+    assert by_code['HAND']['result']['future_qty']=='6' and by_code['QTY']['input']['sea_plan_qty']=='3'
+    assert planner.get(P+path+'/confirmation').status_code==422
+    rejected=post(planner,path+'/submit',{'revision':updated['revision'],'issue_hash':'confirmed'})
+    assert rejected.status_code==422 and 'QTY' in rejected.text and '当月销量' in rejected.text
 
 
 def test_quantity_update_preserves_blanks_and_clears_explicit_zeros(clients):
@@ -155,7 +162,7 @@ def test_quantity_update_preserves_blanks_and_clears_explicit_zeros(clients):
     path = setup_plan(planner)
     draft = ok(planner.get(P+path))
     ok(post(planner, path+'/items', {'revision':draft['revision'], 'items':[
-        {'material_code':code, 'sea_plan_qty':'7', 'air_plan_qty':'4'} for code in ('SEA','AIR','KEEP')]}))
+        {'material_code':code, 'sea_plan_qty':'7', 'air_plan_qty':'4', 'reference':{'current_sales':0,'shortage_qty':0}} for code in ('SEA','AIR','KEEP')]}))
 
     def apply(rows, mode):
         job = upload(planner, 'plan', csvfile(['物料号,海运计划,空运计划', *rows]))

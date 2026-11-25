@@ -1,11 +1,14 @@
+import csv
+from io import StringIO
 from copy import deepcopy
 from fastapi import APIRouter, Body, Depends, Request, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import Response
-from .master_import import read_master
+from .master_import import read_master, MASTER_ENGLISH
 from .adapters import MAX_BYTES
 from .governance import MASTER_FIELDS, effective_input
 from typing import Any
 from sqlalchemy import select, delete
+from sqlalchemy.orm import selectinload
 from .db import *
 from .api_common import context, once
 from .auth import role, scope, hasher, public_user, password_change, valid_password
@@ -13,6 +16,8 @@ from .rules import MODEL_V2, MODEL_V3, DELAY_DEFAULTS, TURNOVER_DEFAULTS, upgrad
 from . import services as svc
 from .markets import EUROPE, LEGACY_DEFAULT, applies_to, rule_scopes, superseded_codes
 from .account_import import ROLE_NAMES, inspect_accounts
+from .account_email import normalize_email
+from .workflow_outbox import refresh_recipient_email
 
 router=APIRouter()
 
@@ -21,9 +26,12 @@ def check_master_scope(package,kind,code):
     svc.demand(master is None or (kind=='WAREHOUSE' and master['warehouse']==code),'物料主数据只能用于所属仓库的标准')
 
 @router.get('/rules/master-template')
-def master_template(ctx=Depends(context,scope="function")):
+def master_template(ctx=Depends(context,scope="function"),lang:str='zh'):
     _,user=ctx;role(user,'REVIEWER')
-    content='\ufeff'+','.join(['物料号',*MASTER_FIELDS.values()])+'\r\n'
+    labels = ['Material number',*(MASTER_ENGLISH[key] for key in MASTER_FIELDS)] if lang=='en' else ['物料号',*MASTER_FIELDS.values()]
+    buf=StringIO()
+    csv.writer(buf).writerow(labels)
+    content='\ufeff'+buf.getvalue()
     return Response(content,media_type='text/csv',headers={'Content-Disposition':'attachment; filename=material-master.csv'})
 
 @router.post('/rules/master-preview')
@@ -112,6 +120,8 @@ def clone_rule(data:dict,request:Request,ctx=Depends(context,scope="function")):
                 package = upgrade_to_v3(package) if model == MODEL_V3 else upgrade_to_v2(package)
             if package.get('master_data') and (kind!='WAREHOUSE' or code!=package['master_data']['warehouse']):
                 package.pop('master_data')
+        if model == MODEL_V3:
+            package = upgrade_to_v3(package)
         check_master_scope(package,kind,code)
         name=data.get('name',(source.name+' · 新版本')[:100])
         note=data.get('note','')
@@ -131,6 +141,8 @@ def update_rule(rule_id:str,data:dict,ctx=Depends(context,scope="function")):
     editable_scope(db,user,r.scope,r.scope_code)
     package=data.get('package');svc.demand(isinstance(package,dict),'规则参数格式有误')
     errors=validate_package(package);svc.demand(not errors,{'message':'参数检查未通过','issues':errors})
+    if package.get('model') == MODEL_V3:
+        package = upgrade_to_v3(package)
     check_master_scope(package,r.scope,r.scope_code)
     r.package=deepcopy(package);r.note=str(data.get('note',''))[:2000];r.proof=None
     audit(db,user,'修改规则草稿',rule_id=r.id,hash=fingerprint(package));db.flush();return rule_json(r)
@@ -213,7 +225,8 @@ def publish_rule(rule_id:str,data:dict,request:Request,ctx=Depends(context,scope
 @router.get('/users')
 def users(ctx=Depends(context,scope="function")):
     db,user=ctx;role(user,'ADMIN')
-    return [public_user(u) for u in db.scalars(select(User).order_by(User.created_at)) if set(u.warehouses)<=set(user.warehouses)]
+    accounts=db.scalars(select(User).options(selectinload(User.avatar)).order_by(User.created_at))
+    return [public_user(u) for u in accounts if set(u.warehouses)<=set(user.warehouses)]
 
 @router.post('/users')
 def create_user(data:dict,request:Request,ctx=Depends(context,scope="function")):
@@ -229,11 +242,17 @@ def create_user(data:dict,request:Request,ctx=Depends(context,scope="function"))
 def add_user(db,admin,data):
     password=data.get('password')
     svc.demand(valid_password(password),'初始密码需为 6–200 位')
-    account=User(id=uid(),username=data['username'],name=data['name'],roles=data['roles'],
+    account=User(id=uid(),username=data['username'],name=data['name'],roles=data['roles'],email=account_email(data.get('email')),
                  warehouses=data['warehouses'],password_hash=hasher.hash(password))
     db.add(account)
     audit(db,admin,'创建用户',target=account.id,roles=account.roles,warehouses=account.warehouses)
     return account
+
+def account_email(value):
+    try:
+        return normalize_email(value)
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from None
 
 @router.post('/users/bulk/preview')
 def preview_users(data:Any=Body(...),ctx=Depends(context,scope="function")):
@@ -267,22 +286,37 @@ def validate_user(data,user):
 def edit_user(user_id:str,data:dict,ctx=Depends(context,scope="function")):
     db,user=ctx;role(user,'ADMIN');target=db.get(User,user_id);svc.demand(target is not None,'账号不存在',404)
     svc.demand(set(target.warehouses)<=set(user.warehouses),'不在当前管理范围',403)
-    validate_user(data,user)
-    if target.id==user.id:
-        svc.demand(data.get('active',True) and 'ADMIN' in data['roles'],'不能停用自己的管理权限')
+    roles=data.get('roles',target.roles)
+    warehouses=data.get('warehouses',target.warehouses)
+    if 'roles' in data or 'warehouses' in data:
+        validate_user({'roles':roles,'warehouses':warehouses},user)
     active=bool(data.get('active',target.active))
-    if not data.get('password') and set(target.roles)==set(data['roles']) and set(target.warehouses)==set(data['warehouses']) and target.active==active:
-        return public_user(target)
-    target.roles=data['roles'];target.warehouses=data['warehouses'];target.active=active
-    if data.get('password'):password_change(db,target,data['password'])
-    db.execute(delete(LoginSession).where(LoginSession.user_id==target.id))
-    audit(db,user,'修改用户授权',target=target.id,roles=target.roles,warehouses=target.warehouses,active=target.active)
+    if target.id==user.id:
+        svc.demand(active and 'ADMIN' in roles,'不能停用自己的管理权限')
+    if 'email' in data:
+        email=account_email(data['email'])
+        if email!=target.email:
+            target.email=email
+            refresh_recipient_email(db,target)
+            audit(db,user,'修改通知邮箱',target=target.id)
+    if data.get('password') or set(target.roles)!=set(roles) or set(target.warehouses)!=set(warehouses) or target.active!=active:
+        target.roles=roles;target.warehouses=warehouses;target.active=active
+        if data.get('password'):password_change(db,target,data['password'])
+        db.execute(delete(LoginSession).where(LoginSession.user_id==target.id))
+        audit(db,user,'修改用户授权',target=target.id,roles=target.roles,warehouses=target.warehouses,active=target.active)
     return public_user(target)
 
 @router.post('/password')
 def change_password(data:dict,ctx=Depends(context,scope="function")):
     db,user=ctx
     from argon2.exceptions import VerificationError
-    try:valid=hasher.verify(user.password_hash,data.get('current_password',''))
+    current=data.get('current_password')
+    try:valid=isinstance(current,str) and hasher.verify(user.password_hash,current)
     except VerificationError:valid=False
-    svc.demand(valid,'当前密码不正确',403);password_change(db,user,data.get('password',''));audit(db,user,'修改密码');return {'ok':True}
+    svc.demand(valid,'当前密码不正确',403)
+    new_password=data.get('password')
+    svc.demand(new_password!=user.username,'新密码不能与登录账号相同')
+    svc.demand(new_password!=current,'新密码与当前密码相同')
+    password_change(db,user,new_password)
+    audit(db,user,'修改密码')
+    return {'ok':True}
