@@ -8,6 +8,7 @@ from sqlalchemy import select, or_, and_, update
 from .db import SessionLocal, Job, Version, Rule, Snapshot, DATA, now,NotificationEvent,Notification,User
 from .adapters import parse_file, FIELDS
 from .rules import calculate, serial, number
+from .roles import has_role
 
 FILES=DATA/'files'
 FILES.mkdir(parents=True,exist_ok=True)
@@ -20,7 +21,7 @@ WORKER_PROGRESS = {}
 def file_validation(items,kind,package=None):
     problems=[]
     for item in items:
-        if kind in ('standard','legacy','v2'):
+        if kind in ('standard','legacy','v2','v3'):
             errors=calculate(item,package)['errors']
         elif kind=='plan':
             errors=[]
@@ -39,6 +40,11 @@ def file_validation(items,kind,package=None):
     return problems
 
 
+def parse_upload(payload):
+    return parse_file((FILES/payload['file_id']).read_bytes(), payload['filename'], payload['kind'],
+                      payload.get('mapping'), payload['net_mode'], payload.get('sheet_name'))
+
+
 def run_job(job_id):
     with SessionLocal() as db:
         job=db.get(Job,job_id);payload=deepcopy(job.payload);kind=job.kind
@@ -47,7 +53,7 @@ def run_job(job_id):
         validation_package=rule.package if rule else None
     try:
         if kind=='import':
-            result=parse_file((FILES/payload['file_id']).read_bytes(),payload['filename'],payload['kind'],payload.get('mapping'),payload['net_mode'],payload.get('sheet_name'))
+            result=parse_upload(payload)
             result['validation']=file_validation(result['items'],result['kind'],validation_package)
         elif kind=='export':
             content=export_workbook(payload)
@@ -93,7 +99,7 @@ def deliver_notifications():
                 if p['warehouse'] not in u.warehouses:continue
                 if p.get('recipient') and u.id!=p['recipient']:continue
                 if p['reviewers']:
-                    if 'REVIEWER' not in u.roles or u.id==p['owner']:continue
+                    if not has_role(u,'REVIEWER') or u.id==p['owner']:continue
                 elif u.id!=p['owner']:continue
                 nid=hashlib.sha256((eid+u.id).encode()).hexdigest()[:32]
                 if not db.get(Notification,nid):db.add(Notification(id=nid,user_id=u.id,batch_id=p['batch_id'],warehouse=p['warehouse'],text=p['text']))

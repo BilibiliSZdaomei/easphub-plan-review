@@ -67,8 +67,9 @@ def build(args):
     source_version = json.loads((source/'frontend/package.json').read_text(encoding='utf-8-sig'))['version']
     if not (manifest.get('version') == source_version == args.version):
         raise ValueError('Frontend build, source and release versions must match')
-    if manifest['base_path'] != '/plan-review' or manifest['account_mode'] != 'managed':
-        raise ValueError('Expected a managed /plan-review frontend')
+    if (manifest['base_path'] != '/plan-review' or manifest['account_mode'] != 'managed'
+            or manifest.get('review_model') != 'V3'):
+        raise ValueError('Expected a managed V3 /plan-review frontend')
     output = args.output.resolve()
     if source in output.parents or output == source:
         raise ValueError('Use an output path outside the release checkout')
@@ -144,7 +145,7 @@ def build(args):
                 add_file(z, source/file, file)
             for path in sorted((source/'backend').glob('*.py')):
                 add_file(z,path,path.relative_to(source))
-            for filename in ('plan-review-v2.xlsx', 'replenishment-plan.xlsx'):
+            for filename in ('plan-review-v2.xlsx', 'plan-review-v3.xlsx', 'replenishment-plan.xlsx'):
                 template = source/'backend'/'templates'/filename
                 add_file(z,template,template.relative_to(source))
             for path in sorted((source/'migrations').rglob('*')):
@@ -188,5 +189,5 @@ if __name__ == '__main__':
     parser.add_argument('--ui', type=Path, required=True)
     parser.add_argument('--python-archive',type=Path,required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--version', default='2.1.0')
+    parser.add_argument('--version', required=True)
     build(parser.parse_args())

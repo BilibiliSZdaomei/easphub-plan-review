@@ -9,6 +9,7 @@ from .db import Warehouse
 EUROPE = 'EUROPE'
 LEGACY_DEFAULT = 'UK'
 EUROPE_RULE_NAME = '欧洲通用标准 · V2'
+EUROPE_V3_RULE_NAME = '欧洲通用标准 · V3'
 MARKET_NAMES = {
     'NL': '荷兰', 'UK': '英国', 'DE': '德国', 'IT': '意大利', 'FR': '法国',
     'ES': '西班牙', 'PL': '波兰', 'CH': '瑞士', 'SE': '瑞典', 'UZ': '乌兹别克斯坦',

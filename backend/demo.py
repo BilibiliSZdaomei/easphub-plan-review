@@ -7,7 +7,7 @@ from .markets import EUROPE, LEGACY_DEFAULT, EUROPE_RULE_NAME, MARKET_NAMES, mar
 
 from secrets import token_urlsafe
 
-# Random test-fixture login scoped to the isolated process.
+# Random login only for explicitly enabled synthetic test fixtures.
 DEMO_PASSWORD = token_urlsafe(24)
 def demo_items():
     base={"material_type":"车身件","material_abc":"A","local_abc":"B","is_key_model":True,"fleet_qty":"5926",
@@ -60,7 +60,7 @@ def seed_demo(db):
         return
     fresh = db.scalar(select(User.id).limit(1)) is None
     users = {u.username:u for u in db.scalars(select(User).where(
-        User.username.in_(['planner','spain','test_reviewer','test_steward','viewer','europe_planner'])))}
+        User.username.in_(['planner','spain','test_reviewer','test_steward','europe_planner'])))}
     if not fresh:
         original = db.scalar(select(Batch).where(Batch.number=='PR-DEMO-UK_MAIN'))
         if not original or 'planner' not in users or original.owner != users['planner'].id:
@@ -68,9 +68,9 @@ def seed_demo(db):
     warehouses, added = register_markets(db, warehouse_config())
     codes = [w.code for w in warehouses]
     accounts = [('planner','计划员 · 英国',['PLANNER'],['UK_MAIN']),
-                ('spain','计划员 · 西班牙',['PLANNER'],['ES_NSC']),('viewer','管理查看',['VIEWER'],['UK_MAIN']),
-                ('test_reviewer','复审员',['REVIEWER','RULE_EDITOR','RULE_PUBLISHER'],codes),
-                ('test_steward','数据维护员',['ADMIN','DATA_STEWARD','RULE_EDITOR'],codes),
+                ('spain','计划员 · 西班牙',['PLANNER'],['ES_NSC']),
+                ('test_reviewer','复审员',['REVIEWER'],codes),
+                ('test_steward','管理员',['ADMIN'],codes),
                 ('europe_planner','欧洲计划员',['PLANNER'],codes)]
     for username, name, roles, allowed in accounts:
         account = users.get(username)

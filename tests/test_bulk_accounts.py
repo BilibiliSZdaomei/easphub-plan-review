@@ -28,7 +28,7 @@ def test_password_length_across_account_flows(clients):
 def test_bulk_preview_and_commit(clients):
     _, _, admin, _ = clients
     table = HEADER + f'a-plan\t计划人员\t{SECRET}\t计划员\t荷兰中心仓、DE_NSC\n' + \
-                     f'a-review\t复审人员\t{SECRET}\t复审、只读查看\tDE_NSC'
+                     f'a-review\t复审人员\t{SECRET}\t复审员\tDE_NSC'
     body = {'table':table}
     preview = post(admin,'/users/bulk/preview',body)
     assert preview.status_code == 200 and SECRET not in preview.text

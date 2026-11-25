@@ -2,8 +2,9 @@ import {useEffect, useRef, useState, type FormEvent} from 'react'
 import {ArrowLeft, Save} from 'lucide-react'
 import {api} from './api'
 import {Notice, useFormExit} from './ui'
+import MasterFields, {type GovernanceConfig} from './MasterFields'
 
-type RulePackage = {
+type RulePackage = GovernanceConfig & {
   model?: string
   params: Record<string, string | number>
   keywords: Record<string, string[]>
@@ -43,10 +44,11 @@ export function collectPackage(pkg:RulePackage, text:string):RulePackage {
   return {...pkg, overrides:Object.fromEntries(entries)}
 }
 
-export function RuleFields({pkg, labels, overrides, disabled, onPackage, onOverrides}:{
-  pkg:RulePackage; labels:Labels; overrides:string; disabled:boolean; onPackage:(value:RulePackage)=>void; onOverrides:(value:string)=>void
+export function RuleFields({pkg, warehouse, labels, overrides, disabled, onPackage, onOverrides}:{
+  pkg:RulePackage; warehouse?:string; labels:Labels; overrides:string; disabled:boolean; onPackage:(value:RulePackage)=>void; onOverrides:(value:string)=>void
 }) {
   return <>
+    {pkg.model==='V3'&&<MasterFields key={warehouse||'shared'} config={pkg} warehouse={warehouse} disabled={disabled} onChange={patch=>onPackage({...pkg,...patch})}/>}
     <div className="parameter-grid">{Object.entries(labels).filter(([key])=>key in pkg.params).map(([key,label])=>
       <label key={key}><span>{label}</span><input disabled={disabled} type="number" step="any" min="0" required
         value={pkg.params[key]} onChange={e=>onPackage({...pkg,params:{...pkg.params,[key]:e.target.value}})} /></label>
@@ -75,8 +77,8 @@ function initialValues(source:Rule) {
   }
 }
 
-export default function CreateRule({initial, sources, warehouses, labels, v2Defaults, onClose, onCreated, onDirty}:{
-  initial:Rule; sources:Rule[]; warehouses:Warehouse[]; labels:Labels; v2Defaults:RulePackage['params']
+export default function CreateRule({initial, sources, warehouses, labels, v2Defaults, v3Defaults, onClose, onCreated, onDirty}:{
+  initial:Rule; sources:Rule[]; warehouses:Warehouse[]; labels:Labels; v2Defaults:RulePackage['params']; v3Defaults:RulePackage['params']
   onClose:()=>void; onCreated:(rule:Rule)=>void; onDirty:(dirty:boolean)=>void
 }) {
   const [form,setForm]=useState(()=>initialValues(initial))
@@ -97,19 +99,29 @@ export default function CreateRule({initial, sources, warehouses, labels, v2Defa
     const next=sources.find(r=>r.id===id)
     if(next){setForm(initialValues(next));setDirty(false);setError('')}
   }
+  function changeCoverage(scope:string,code:string) {
+    const changing=pkg.master_data && (scope!=='WAREHOUSE'||code!==pkg.master_data.warehouse)
+    if(changing){
+      if(!window.confirm('新范围只带入审核规则，本仓物料主数据留在原仓。继续？'))return
+      const {master_data,...common}=pkg
+      edit({scope,code,pkg:common})
+    }else edit({scope,code})
+  }
   function changeScope(scope:string) {
     let code=''
     if(scope===source.scope && !(scope==='DEFAULT' && source.scope_code!=='EUROPE')) code=source.scope_code
     else if(scope==='DEFAULT') code='EUROPE'
     else if(scope==='MARKET' && markets.size===1) code=warehouses[0].market
     else if(scope==='WAREHOUSE' && warehouses.length===1) code=warehouses[0].code
-    edit({scope,code})
+    changeCoverage(scope,code)
   }
   function changeModel(model:string) {
-    if(model==='V2'){edit({pkg:{...pkg,model,params:{...v2Defaults,...pkg.params}}});return}
-    const params={...pkg.params}
-    for(const key of Object.keys(v2Defaults)) delete params[key]
-    edit({pkg:{...pkg,model,params}})
+    const params={...v2Defaults,...v3Defaults,...pkg.params}
+    if(model!=='V3') for(const key of Object.keys(v3Defaults)) delete params[key]
+    if(model==='0804') for(const key of Object.keys(v2Defaults)) delete params[key]
+    const next={...pkg,model,params}
+    if(model!=='V3'){delete next.master_data;delete next.target_policy}
+    edit({pkg:next})
   }
   async function submit(e:FormEvent) {
     e.preventDefault()
@@ -142,17 +154,17 @@ export default function CreateRule({initial, sources, warehouses, labels, v2Defa
           {warehouses.some(w=>w.region==='EUROPE')&&<option value="DEFAULT">欧洲通用</option>}
           <option value="MARKET">指定市场</option><option value="WAREHOUSE">指定仓库</option>
         </select></label>
-        {form.scope && form.scope!=='DEFAULT'&&<label>适用范围<select required disabled={busy} value={form.code} onChange={e=>edit({code:e.target.value})}>
+        {form.scope && form.scope!=='DEFAULT'&&<label>适用范围<select required disabled={busy} value={form.code} onChange={e=>changeCoverage(form.scope,e.target.value)}>
           <option value="" disabled>{form.scope==='MARKET'?'选择市场':'选择仓库'}</option>
           {form.scope==='MARKET'?Array.from(markets,([code,label])=><option key={code} value={code}>{label}</option>):
             warehouses.map(w=><option key={w.code} value={w.code}>{w.name}</option>)}
         </select></label>}
-        {source.package.model!=='V2'&&<label>审核模型<select disabled={busy} value={pkg.model || '0804'} onChange={e=>changeModel(e.target.value)}>
-          <option value="0804">0804</option><option value="V2">V2</option>
+        {source.package.model!=='V3'&&<label>审核模型<select disabled={busy} value={pkg.model || '0804'} onChange={e=>changeModel(e.target.value)}>
+          {source.package.model!=='V2'&&<option value="0804">0804</option>}<option value="V2">V2</option><option value="V3">V3</option>
         </select></label>}
       </div>
       <div className="panel-heading"><h2>审核参数</h2></div>
-      <RuleFields pkg={pkg} labels={labels} disabled={busy} overrides={form.overrides}
+      <RuleFields warehouse={form.scope==='WAREHOUSE'?form.code:undefined} pkg={pkg} labels={labels} disabled={busy} overrides={form.overrides}
         onPackage={pkg=>edit({pkg})} onOverrides={overrides=>edit({overrides})}/>
       {error&&<Notice tone="error" message={error}/>}
       <div className="rule-edit-footer">

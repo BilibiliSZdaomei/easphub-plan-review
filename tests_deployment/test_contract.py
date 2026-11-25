@@ -71,7 +71,7 @@ def test_synthetic_upload_and_chinese_formula_export(fixture):
     app, _ = fixture
     with TestClient(app,base_url='https://testserver') as client:
         login(client)
-        for kind in ('plan','v2'):
+        for kind in ('plan','v2','v3'):
             response = client.get(API+'/template', params={'kind':kind})
             assert response.status_code == 200
             template = load_workbook(BytesIO(response.content), read_only=True)

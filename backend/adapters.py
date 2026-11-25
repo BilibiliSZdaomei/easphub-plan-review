@@ -15,6 +15,7 @@ MAX_ROWS = 10000
 FIELDS = {
     "material_code": "物料号", "material_name": "物料名称", "material_type": "物料类型", "material_abc": "物料分类ABC",
     "vehicle_model": "车型", "local_abc": "本地ABC", "is_key_model": "是否重点车型", "fleet_qty": "装车量", "vehicle_parc": "备件保有量",
+    "future_fleet_qty": "未来装车量",
     "avg_sales_3m": "近三个月月均销量", "avg_sales_6m": "近六个月月均销量", "replacement_rate": "稳态更换率",
     "replacement_target": "更换率目标库存", "sales_target": "销量目标库存", "net_supply_before_plan": "审核前净额",
     "sea_plan_qty": "海运计划", "air_plan_qty": "空运计划", "on_hand_qty": "在库数量", "in_transit_qty": "在途数量",
@@ -22,7 +23,9 @@ FIELDS = {
     "reason_code": "原因类别", "reason": "计划说明", "air_reason": "空运说明", "source_line_id": "源明细行ID", "source_note": "备注",
 }
 PLAN_COLUMNS = ("material_code", "material_name", "sea_plan_qty", "air_plan_qty", "reason_code", "reason", "air_reason")
+PLAN_QUANTITIES = ("sea_plan_qty", "air_plan_qty")
 PLAN_LABELS = {FIELDS[key] for key in PLAN_COLUMNS}
+REFERENCE_HEADERS = {"large_value_flag": "高单价大体积识别", "current_sales": "当月销量", "shortage_qty": "缺货"}
 
 
 def plan_header(label):
@@ -80,8 +83,7 @@ def normalize(item, row, sheet, filename, net_mode="NET_PROVIDED", legacy=False)
     item["is_key_model"] = boolean(item.get("is_key_model"))
     item["uom"] = item.get("uom") or "PCS"
     item["quantity_step"] = item.get("quantity_step") or "1"
-    # Explicit file contract: blank order quantities mean no new order, not missing supply.
-    for key in ("sea_plan_qty", "air_plan_qty"):
+    for key in PLAN_QUANTITIES:
         item[key] = item.get(key) if item.get(key) not in (None, "") else "0"
     item["source"] = {"file": Path(filename).name, "sheet": sheet, "row": row, "adapter": "UK0804-v1" if legacy else "STANDARD-v1"}
     item["source_values"] = dict(item)
@@ -102,16 +104,34 @@ def normalize(item, row, sheet, filename, net_mode="NET_PROVIDED", legacy=False)
 
 def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROVIDED", sheet_name=None):
     started=time.monotonic()
+    plan_upload = kind == "plan"
     if len(data) > MAX_BYTES:
         raise ValueError("文件超过20MiB，请分批处理")
     suffix = Path(filename).suffix.lower()
     mapping = mapping or {}
     labels = {key:plan_header(value) for key,value in mapping.items()} if kind == "plan" else mapping
-    if kind in ("legacy", "v2") and net_mode != "NET_PROVIDED":
+    if kind in ("legacy", "v2", "v3") and net_mode != "NET_PROVIDED":
         raise ValueError("审核原表须使用已提供净额")
     if net_mode not in ("NET_PROVIDED", "COMPONENTS"):
         raise ValueError("请选择明确的净供给口径")
-    items, headers = [], []
+    items, headers, issues = [], [], []
+
+    def add_item(item, row, sheet, formulas=None):
+        normalized = normalize(item, row, sheet, filename, net_mode, kind == "legacy")
+        if kind in ("v2", "v3"):
+            normalized["source"]["adapter"] = "PLAN-" + kind.upper()
+        if formulas:
+            normalized["source_formulas"] = formulas
+        if plan_upload:
+            # Keep supplied zeros distinct from an empty cell, including a formula with no cached value.
+            supplied = {key: canonical((formulas or {}).get(key, {}).get("cached", item.get(key)))
+                        for key in PLAN_QUANTITIES}
+            normalized["source_values"].update(supplied)
+            if normalized["material_code"] and all(value in (None, "") for value in supplied.values()):
+                issues.append({"row": row, "material_code": normalized["material_code"], "field": "plan_quantities",
+                               "message": "海运计划和空运计划至少填写一项", "repair_hint": "填写本期计划数量，明确不补货可填 0"})
+        items.append(normalized)
+
     if suffix == ".xlsx":
         try:
             with zipfile.ZipFile(BytesIO(data)) as archive:
@@ -126,15 +146,20 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                 raise ValueError("工作表数量超过20")
             if kind == "legacy" and "Sheet1" not in wb.sheetnames:
                 raise ValueError("未找到英国0804的Sheet1")
-            default_sheet = "Sheet1" if kind == "legacy" else "审核表" if kind == "v2" else wb.sheetnames[0]
+            default_sheet = "Sheet1" if kind == "legacy" else "审核表" if kind in ("v2", "v3") else wb.sheetnames[0]
             if kind == "plan" and not mapping and not sheet_name and "计划明细" in wb.sheetnames:
                 candidate = next(wb["计划明细"].values, ())
                 if FIELDS["material_code"] in map(plan_header, candidate):
                     default_sheet = "计划明细"
-            if kind == "standard" and not mapping and not sheet_name and "审核表" in wb.sheetnames:
+            if kind in ("standard", "plan") and not mapping and not sheet_name and "审核表" in wb.sheetnames:
                 candidate = next(wb["审核表"].values, ())
-                if all(h in candidate for h in V2_HEADERS.values()):
+                if all(h in candidate for h in V2_HEADERS.values()) or (plan_upload and "近半年月均销量" in candidate):
                     default_sheet = "审核表"
+            if plan_upload and not mapping and not sheet_name and default_sheet != "审核表" and "Sheet1" in wb.sheetnames:
+                candidate = next(wb["Sheet1"].values, ())
+                if len(candidate) >= 32 and candidate[19:21] == ("库存+在途-需求", "海运计划"):
+                    default_sheet = "Sheet1"
+                    kind = "legacy"
             ws = wb[sheet_name or default_sheet]
             if (ws.max_row or 0) > MAX_ROWS+1 or (ws.max_column or 0) > 100:
                 raise ValueError("超过10000行或100列限制")
@@ -149,20 +174,31 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
             if kind == "legacy" and (len(headers) < 32 or headers[19] != "库存+在途-需求" or headers[20] != "海运计划"):
                 raise ValueError("与英国0804模板不符，请使用标准表映射")
             from openpyxl.utils import column_index_from_string
-            if kind == "standard" and not mapping and all(h in headers for h in V2_HEADERS.values()):
-                kind = "v2"
-            if kind == "v2":
+            if kind in ("standard", "plan") and not mapping and (all(h in headers for h in V2_HEADERS.values()) or
+                    (plan_upload and ws.title == "审核表" and "近半年月均销量" in headers)):
+                kind = "v3" if "未来装车量" in headers else "v2"
+            original_review = kind in ("v2", "v3")
+            if original_review:
                 if net_mode != "NET_PROVIDED":
-                    raise ValueError("V2 审核表须使用已提供净额")
+                    raise ValueError("审核原表须使用已提供净额")
                 missing = [h for h in [*V2_HEADERS.values(), "当月销量"] if h not in headers]
                 if missing:
-                    raise ValueError("V2 审核表缺少列：" + "、".join(missing))
+                    raise ValueError("审核原表缺少列：" + "、".join(missing))
                 indices = {key:headers.index(header) for key,header in V2_HEADERS.items()}
-                if "备注" in headers:
+                if "未来装车量" in headers:
+                    indices["future_fleet_qty"] = headers.index("未来装车量")
+                    kind = "v3"
+                elif kind == "v3":
+                    raise ValueError("V3 审核表缺少列：未来装车量")
+                indices.update({key:headers.index(label) for key,label in REFERENCE_HEADERS.items() if label in headers})
+                if not plan_upload and kind != "v3" and "备注" in headers:
                     indices["source_note"] = headers.index("备注")
                 month_end = headers.index("当月销量")
                 if month_end - indices["avg_sales_6m"] != 7:
                     raise ValueError("近半年月均销量与当月销量之间须有六列月销量，并按从早到晚排列")
+                month_labels = headers[month_end-6:month_end]
+                if not all(month_labels) or len(set(month_labels)) != 6:
+                    raise ValueError("六个月的月销量列须分别标明月份")
             elif kind == "legacy":
                 indices = {key:column_index_from_string(col)-1 for col,key in LEGACY_MAP.items()}
             else:
@@ -175,7 +211,7 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                 if not any(v is not None and str(v).strip() for v in row_values):
                     continue
                 item = {key:row_values[index] if index < len(row_values) else None for key,index in indices.items()}
-                if kind == "v2" and not any(item.get(k) not in (None, "") for k in indices if k not in ("avg_sales_3m", "avg_sales_6m")) and not any(x is not None for x in row_values[month_end-6:month_end]):
+                if original_review and not any(item.get(k) not in (None, "") for k in indices if k not in ("avg_sales_3m", "avg_sales_6m")) and not any(x is not None for x in row_values[month_end-6:month_end]):
                     continue
                 provenance={}
                 for key,index in indices.items():
@@ -185,24 +221,21 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                         provenance[key]={'formula':formula,'cached':item.get(key)}
                         if item.get(key) is None:item[key]='公式没有缓存，请在Excel重新计算并保存'
                         if re.search(r'\[[^\]]+\][^!]*!',formula):item[key]='外部引用公式不接受，请提供核实后的数值'
-                if kind == "v2":
+                if original_review:
                     months = list(row_values[month_end-6:month_end])
                     for pos, raw in enumerate(formula_values[month_end-6:month_end]):
                         if months[pos] is None and str(getattr(raw, "text", raw)).startswith("="):
                             months[pos] = "月销量公式缺少缓存"
                     item["avg_sales_3m"], item["avg_sales_6m"] = v2_sales(months[-3:]), v2_sales(months)
-                    item["monthly_sales"] = dict(zip(headers[month_end-6:month_end], map(canonical, months)))
-                    item["is_key_model"] = str(item.get("is_key_model") or "").strip().upper() == "Y"
-                normalized=normalize(item, r, ws.title, filename, net_mode, kind == "legacy")
-                if kind == "v2":
-                    normalized["source"]["adapter"] = "PLAN-V2"
-                if provenance:normalized['source_formulas']=provenance
-                items.append(normalized)
+                    item["monthly_sales"] = dict(zip(month_labels, map(canonical, months)))
+                    item["month_labels"] = month_labels
+                    item["is_key_model"] = boolean(item.get("is_key_model")) is True
+                add_item(item, r, ws.title, provenance)
             wb.close()
             formula_book.close()
         except (zipfile.BadZipFile, KeyError, StopIteration) as e:
             raise ValueError("无法读取工作簿或指定工作表") from e
-    elif suffix == ".csv" and kind not in ("legacy", "v2"):
+    elif suffix == ".csv" and kind not in ("legacy", "v2", "v3"):
         try:
             reader = csv.DictReader(StringIO(data.decode("utf-8-sig")))
             headers = reader.fieldnames or []
@@ -218,7 +251,7 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
                 if kind == "plan" and not any(value is not None and str(value).strip() for value in source.values()):
                     continue
                 item = {k: source.get((labels.get(k) or FIELDS[k]), source.get(k)) for k in FIELDS}
-                items.append(normalize(item, r, "CSV", filename, net_mode))
+                add_item(item, r, "CSV")
         except UnicodeDecodeError as e:
             raise ValueError("CSV需要使用UTF-8编码") from e
     else:
@@ -226,15 +259,17 @@ def parse_file(data, filename, kind="standard", mapping=None, net_mode="NET_PROV
     if not items:
         raise ValueError("文件中没有可读取的数据行")
     codes = Counter(i["material_code"] for i in items)
-    issues = []
     for item in items:
         if not item["material_code"] or codes[item["material_code"]] > 1:
-            issues.append({"row": item["source"]["row"], "material_code": item["material_code"], "field": "material_code", "message": "物料号为空或重复；请先按物料汇总，不能直接合并计划"})
+            issues.append({"row": item["source"]["row"], "material_code": item["material_code"], "field": "material_code",
+                           "message": "物料号为空或重复，请先按物料汇总", "repair_hint": "检查物料号，并按声明的物料汇总粒度整理后重新上传"})
     by_row={i['source']['row']:i for i in items}
+    issues.sort(key=lambda issue: issue["row"])
     for error in issues:
-        error.update({'file':filename,'sheet':by_row[error['row']]['source']['sheet'],'repair_hint':'检查物料号，并按声明的物料汇总粒度整理后重新上传'})
+        error.update({'file':filename,'sheet':by_row[error['row']]['source']['sheet']})
     return {"items": items, "headers": headers, "issues": issues, "file_hash": __import__('hashlib').sha256(data).hexdigest(), "net_mode": net_mode,
-            "basis_code": {"legacy":"UK0804_NET", "v2":"V2_NET"}.get(kind, "STANDARD_"+net_mode), "mapping": mapping, "kind": kind}
+            "basis_code": {"legacy":"UK0804_NET", "v2":"V2_NET", "v3":"V3_NET"}.get(kind, "STANDARD_"+net_mode), "mapping": mapping, "kind": kind,
+            "plan_format": kind if plan_upload else None, "plan_quantities_checked": plan_upload}
 
 def legacy_evidence(path):
     data = Path(path).read_bytes()

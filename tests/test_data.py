@@ -39,6 +39,10 @@ def test_downloaded_plan_template_guides_and_imports_a_single_real_row(clients):
         title, guidance = cell.value.split('\n', 1)
         assert title == label and guidance.strip()
         assert cell.alignment.wrap_text
+        assert cell.comment and cell.comment.text.strip()
+    for cell in (entry['C1'], entry['D1']):
+        assert all(hint in cell.comment.text for hint in ('留空保留原量', '填 0 清零', '新增物料', '至少填一项'))
+    assert '下拉列表' in entry['E1'].comment.text
     code_hint = entry['A1'].value
     assert '主数据' in code_hint and '0' not in code_hint and '零' not in code_hint
     assert entry['B1'].value == '物料名称\n选填 · 备件描述'
@@ -47,6 +51,8 @@ def test_downloaded_plan_template_guides_and_imports_a_single_real_row(clients):
                     if validation.type == 'list' and 'E2' in validation.sqref]
     assert reason_list.formula1.strip('"').split(',') == list(PLAN_REASON_LABELS)
     example = workbook['填写示例']
+    assert [cell.comment.text for cell in example[4]] == [cell.comment.text for cell in entry[1]]
+    assert '未列出的物料保留' in example['A19'].value
     examples = {row[0]:row[2] for row in example.values if row[0] in PLAN_REASON_LABELS}
     assert set(examples) == set(PLAN_REASON_LABELS)
     assert all(isinstance(text,str) and text.strip() and text != label for label,text in examples.items())

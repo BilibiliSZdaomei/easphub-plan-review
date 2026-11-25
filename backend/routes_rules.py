@@ -1,16 +1,40 @@
 from copy import deepcopy
-from fastapi import APIRouter, Body, Depends, Request, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Request, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import Response
+from .master_import import read_master
+from .adapters import MAX_BYTES
+from .governance import MASTER_FIELDS, effective_input
 from typing import Any
 from sqlalchemy import select, delete
 from .db import *
 from .api_common import context, once
 from .auth import role, scope, hasher, public_user, password_change, valid_password
-from .rules import MODEL_V2, DELAY_DEFAULTS, upgrade_to_v2, validate_package, calculate, fingerprint, PARAM_LABELS, FLAG_LABELS
+from .rules import MODEL_V2, MODEL_V3, DELAY_DEFAULTS, TURNOVER_DEFAULTS, upgrade_to_v2, upgrade_to_v3, validate_package, calculate, fingerprint, PARAM_LABELS, FLAG_LABELS
 from . import services as svc
 from .markets import EUROPE, LEGACY_DEFAULT, applies_to, rule_scopes, superseded_codes
 from .account_import import ROLE_NAMES, inspect_accounts
 
 router=APIRouter()
+
+def check_master_scope(package,kind,code):
+    master=package.get('master_data')
+    svc.demand(master is None or (kind=='WAREHOUSE' and master['warehouse']==code),'物料主数据只能用于所属仓库的标准')
+
+@router.get('/rules/master-template')
+def master_template(ctx=Depends(context,scope="function")):
+    _,user=ctx;role(user,'REVIEWER')
+    content='\ufeff'+','.join(['物料号',*MASTER_FIELDS.values()])+'\r\n'
+    return Response(content,media_type='text/csv',headers={'Content-Disposition':'attachment; filename=material-master.csv'})
+
+@router.post('/rules/master-preview')
+def master_preview(warehouse:str=Form(...),file:UploadFile=File(...),ctx=Depends(context,scope="function")):
+    _,user=ctx;role(user,'REVIEWER');scope(user,warehouse)
+    try:
+        items=read_master(file.file.read(MAX_BYTES+1),file.filename or '')
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from exc
+    return {'warehouse':warehouse,'items':items}
+
 def rule_access(db,user,rule_id):
     r=db.get(Rule,rule_id);svc.demand(r is not None,'规则不存在',404)
     if r.scope=='WAREHOUSE':scope(user,r.scope_code)
@@ -20,6 +44,10 @@ def rule_access(db,user,rule_id):
         allowed = db.scalars(select(Warehouse).where(Warehouse.code.in_(user.warehouses)))
         svc.demand(any(applies_to('DEFAULT', EUROPE, w) for w in allowed),'没有欧洲市场的规则权限',403)
     return r
+def editable_scope(db,user,kind,code):
+    affected={w.code for w in db.scalars(select(Warehouse)) if applies_to(kind,code,w)}
+    svc.demand(affected and affected<=set(user.warehouses),'只能维护已获全部仓库授权的标准',403)
+
 def rule_json(r, proof_visible=True):
     proof=r.proof if proof_visible else None
     if proof:
@@ -29,7 +57,7 @@ def rule_json(r, proof_visible=True):
 
 @router.get('/rules')
 def rules(ctx=Depends(context,scope="function")):
-    db,user=ctx;role(user,'RULE_EDITOR','RULE_PUBLISHER','REVIEWER','ADMIN')
+    db,user=ctx;role(user,'REVIEWER')
     out=[]
     visible_snapshots=set(db.scalars(select(Snapshot.id).where(Snapshot.warehouse.in_(user.warehouses))))
     for r in db.scalars(select(Rule).order_by(Rule.created_at.desc())):
@@ -42,11 +70,11 @@ def rules(ctx=Depends(context,scope="function")):
     for w in db.scalars(select(Warehouse).where(Warehouse.code.in_(user.warehouses))):
         current=next((active[key] for key in rule_scopes(w) if key in active),None)
         coverage[w.code]=current['id'] if current else None
-    return {'items':out,'labels':PARAM_LABELS,'flags':FLAG_LABELS,'coverage':coverage,'v2_defaults':DELAY_DEFAULTS}
+    return {'items':out,'labels':PARAM_LABELS,'flags':FLAG_LABELS,'coverage':coverage,'v2_defaults':DELAY_DEFAULTS,'v3_defaults':TURNOVER_DEFAULTS}
 
 @router.post('/rules')
 def clone_rule(data:dict,request:Request,ctx=Depends(context,scope="function")):
-    db,user=ctx;role(user,'RULE_EDITOR','RULE_PUBLISHER')
+    db,user=ctx;role(user,'REVIEWER')
     def do():
         source_id=data.get('source_id')
         svc.demand(isinstance(source_id,str) and source_id.strip(),'请选择基础标准')
@@ -68,16 +96,23 @@ def clone_rule(data:dict,request:Request,ctx=Depends(context,scope="function")):
             allowed=db.scalars(select(Warehouse).where(Warehouse.code.in_(user.warehouses)))
             svc.demand(any(applies_to('DEFAULT', EUROPE, w) for w in allowed),'没有欧洲市场的规则权限',403)
             code=EUROPE
+        editable_scope(db,user,kind,code)
         source_model=source.package.get('model','0804')
         model=data.get('model',source_model)
-        svc.demand(model in (source_model,MODEL_V2),'审核模型仅支持沿用基础标准或升级至 V2')
+        allowed = ('0804', MODEL_V2, MODEL_V3)
+        svc.demand(model in allowed[allowed.index(source_model):], '请选择基础标准的模型或更新的版本')
         if 'package' in data:
             package=data['package']
             errors=validate_package(package)
             svc.demand(not errors,{'message':'参数检查未通过','issues':errors})
             svc.demand(package.get('model','0804')==model,'自定义参数与所选审核模型不一致')
         else:
-            package=upgrade_to_v2(source.package) if model!=source_model else deepcopy(source.package)
+            package=deepcopy(source.package)
+            if model != source_model:
+                package = upgrade_to_v3(package) if model == MODEL_V3 else upgrade_to_v2(package)
+            if package.get('master_data') and (kind!='WAREHOUSE' or code!=package['master_data']['warehouse']):
+                package.pop('master_data')
+        check_master_scope(package,kind,code)
         name=data.get('name',(source.name+' · 新版本')[:100])
         note=data.get('note','')
         svc.demand(isinstance(name,str) and 0<len(name.strip())<=100,'标准名称需为 1 至 100 个字符')
@@ -90,17 +125,19 @@ def clone_rule(data:dict,request:Request,ctx=Depends(context,scope="function")):
 
 @router.patch('/rules/{rule_id}')
 def update_rule(rule_id:str,data:dict,ctx=Depends(context,scope="function")):
-    db,user=ctx;role(user,'RULE_EDITOR','RULE_PUBLISHER');r=rule_access(db,user,rule_id)
+    db,user=ctx;role(user,'REVIEWER');r=rule_access(db,user,rule_id)
     svc.demand(r.state=='DRAFT','已发布规则不可修改，请复制为新版本',409)
     svc.demand(r.revision==data.get('revision'),'规则已更新，请刷新',409)
+    editable_scope(db,user,r.scope,r.scope_code)
     package=data.get('package');svc.demand(isinstance(package,dict),'规则参数格式有误')
     errors=validate_package(package);svc.demand(not errors,{'message':'参数检查未通过','issues':errors})
+    check_master_scope(package,r.scope,r.scope_code)
     r.package=deepcopy(package);r.note=str(data.get('note',''))[:2000];r.proof=None
     audit(db,user,'修改规则草稿',rule_id=r.id,hash=fingerprint(package));db.flush();return rule_json(r)
 
 @router.post('/rules/{rule_id}/dry-run')
 def dry_run(rule_id:str,data:dict,request:Request,ctx=Depends(context,scope="function")):
-    db,user=ctx;role(user,'RULE_EDITOR','RULE_PUBLISHER');r=rule_access(db,user,rule_id)
+    db,user=ctx;role(user,'REVIEWER');r=rule_access(db,user,rule_id)
     def do():
         svc.demand(r.state=='DRAFT','请对草稿规则进行试算')
         svc.demand(data.get('revision')==r.revision,'规则已更新，请刷新',409)
@@ -108,16 +145,20 @@ def dry_run(rule_id:str,data:dict,request:Request,ctx=Depends(context,scope="fun
         warehouse=db.get(Warehouse,snap.warehouse)
         if r.scope=='DEFAULT' and r.scope_code==LEGACY_DEFAULT:
             r.scope_code=EUROPE
+        editable_scope(db,user,r.scope,r.scope_code)
         svc.demand(applies_to(r.scope,r.scope_code,warehouse),'试算快照不属于此规则的适用范围')
         errors=validate_package(r.package);svc.demand(not errors,{'message':'参数检查未通过','issues':errors})
         baseline=svc.active_rule(db,snap.warehouse,required=False);changes=[];new_errors=[]
-        def outcome(result):
-            return {'lower':result['lower'],'upper':result['upper'],'status':result['quantity_status'],
+        def outcome(result,inp):
+            values=effective_input({'input':inp,'result':result})
+            return {**{key:values.get(key) for key in ('replacement_rate','replacement_target','sales_target')},
+                    'lower':result['lower'],'upper':result['upper'],'status':result['quantity_status'],
                     'review_mode':result['review_mode'],'flags':result['manual_flags'],'data_status':result['data_status'],
+                    'future_qty':result['future_qty'], 'turnover_warning':result.get('turnover_warning'),
                     'delay':result.get('delay_replenishment') is True}
         for inp in snap.items:
-            before=outcome(calculate(inp,baseline.package)) if baseline else {}
-            b=calculate(inp,r.package);after=outcome(b)
+            before=outcome(calculate(inp,baseline.package),inp) if baseline else {}
+            b=calculate(inp,r.package);after=outcome(b,inp)
             new_error=b['data_status']=='ERROR' and before.get('data_status')!='ERROR'
             if new_error:new_errors.append(inp['material_code'])
             if before!=after:
@@ -131,7 +172,7 @@ def dry_run(rule_id:str,data:dict,request:Request,ctx=Depends(context,scope="fun
 
 @router.get('/rules/{rule_id}/trial-impacts')
 def trial_impacts(rule_id:str,q:str='',page:int=Query(1,ge=1),at:str='',errors_only:bool=False,ctx=Depends(context,scope="function")):
-    db,user=ctx;role(user,'RULE_EDITOR','RULE_PUBLISHER','REVIEWER','ADMIN')
+    db,user=ctx;role(user,'REVIEWER')
     rule=rule_access(db,user,rule_id);proof=rule.proof
     svc.demand(proof,'尚无试算记录',404)
     warehouse=db.scalar(select(Snapshot.warehouse).where(Snapshot.id==proof['snapshot_id']))
@@ -149,7 +190,7 @@ def trial_impacts(rule_id:str,q:str='',page:int=Query(1,ge=1),at:str='',errors_o
 
 @router.post('/rules/{rule_id}/publish')
 def publish_rule(rule_id:str,data:dict,request:Request,ctx=Depends(context,scope="function")):
-    db,user=ctx;role(user,'RULE_PUBLISHER');r=rule_access(db,user,rule_id)
+    db,user=ctx;role(user,'REVIEWER');r=rule_access(db,user,rule_id)
     def do():
         svc.demand(r.state=='DRAFT','此规则已发布',409);svc.demand(r.revision==data.get('revision'),'规则内容已变更，请刷新',409)
         svc.demand(r.proof and r.proof['package_hash']==fingerprint(r.package) and not r.proof['new_errors'],'请先完成试算并解决新增数据或区间错误')
@@ -217,8 +258,9 @@ def create_users(request:Request,data:Any=Body(...),ctx=Depends(context,scope="f
     return once(db,user,request,{'table':table,'nonce':request.headers.get('Idempotency-Key')},do)
 
 def validate_user(data,user):
-    allowed=set(ROLE_NAMES)
-    svc.demand(isinstance(data.get('roles'),list) and bool(data['roles']) and set(data['roles'])<=allowed,'角色配置无效')
+    roles=data.get('roles')
+    svc.demand(isinstance(roles,list) and len(roles)==1 and isinstance(roles[0],str) and roles[0] in ROLE_NAMES,
+               '请选择一个角色：计划员、复审员或管理员')
     svc.demand(isinstance(data.get('warehouses'),list) and set(data['warehouses'])<=set(user.warehouses),'不能授予当前管理范围以外的仓库权限',403)
 
 @router.patch('/users/{user_id}')
@@ -228,7 +270,6 @@ def edit_user(user_id:str,data:dict,ctx=Depends(context,scope="function")):
     validate_user(data,user)
     if target.id==user.id:
         svc.demand(data.get('active',True) and 'ADMIN' in data['roles'],'不能停用自己的管理权限')
-        svc.demand(set(data['roles'])<=set(user.roles),'不能给自己增加业务审批权限',403)
     active=bool(data.get('active',target.active))
     if not data.get('password') and set(target.roles)==set(data['roles']) and set(target.warehouses)==set(data['warehouses']) and target.active==active:
         return public_user(target)

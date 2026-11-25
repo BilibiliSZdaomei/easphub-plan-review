@@ -9,10 +9,8 @@ from sqlalchemy import select
 
 from .db import User, Warehouse
 from .auth import valid_password
+from .roles import ROLE_NAMES
 
-
-ROLE_NAMES = {'PLANNER':'计划员', 'REVIEWER':'复审人员', 'DATA_STEWARD':'数据维护',
-              'RULE_EDITOR':'规则编辑', 'RULE_PUBLISHER':'规则发布', 'ADMIN':'系统管理', 'VIEWER':'只读查看'}
 HEADERS = ['账号', '姓名', '初始密码', '角色', '授权仓库']
 MAX_ACCOUNTS = 100
 
@@ -65,7 +63,7 @@ def inspect_accounts(db, admin, table):
     names = Counter(w.name for w in allowed)
     warehouse_aliases = {w.name:w.code for w in allowed if names[w.name] == 1}
     warehouse_aliases.update({w.code:w.code for w in allowed})
-    roles = {**{v:k for k,v in ROLE_NAMES.items()}, **{k:k for k in ROLE_NAMES}, '复审':'REVIEWER'}
+    roles = {**{v:k for k,v in ROLE_NAMES.items()}, **{k:k for k in ROLE_NAMES}, '复审':'REVIEWER', '复审人员':'REVIEWER', '系统管理':'ADMIN'}
     logins = Counter(fields[0].strip() for _,fields in rows if fields)
     existing = set(db.scalars(select(User.username).where(User.username.in_([n for n in logins if len(n)<=80]))))
     preview, accounts = [], []
@@ -89,8 +87,8 @@ def inspect_accounts(db, admin, table):
             issues.append('请填写有效姓名（最多 255 字）')
         if not valid_password(password):
             issues.append('初始密码需为 6–200 位')
-        if not valid_roles:
-            issues.append('请核对角色')
+        if not valid_roles or len(role_ids)!=1:
+            issues.append('请选择一个角色：计划员、复审员或管理员')
         if not valid_warehouses:
             issues.append('请填写授权范围内的仓库名称或编码')
         public = {'username':username,'name':name,'roles':role_ids,'warehouses':warehouse_ids}

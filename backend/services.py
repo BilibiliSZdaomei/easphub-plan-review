@@ -5,11 +5,15 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from .db import Batch, Version, Rule, Snapshot, User, Notification, NotificationEvent,Warehouse, audit, uid, now
 from .auth import role, scope
+from .roles import has_role
+from .governance import apply_governance, MASTER_FIELDS
 from .rules import calculate, pending_plan_result, submission_issues, fingerprint, validate_package
 from .rules import canonical_reason, REASON_LABELS
 from .periods import period_info
 from .exceptions import business_warnings, confirmation, warning_record
 from .markets import rule_scopes
+from .adapters import boolean, canonical, v2_sales
+from .rules import number, serial
 
 def demand(condition,message,status=422):
     if not condition: raise HTTPException(status,message)
@@ -48,10 +52,12 @@ def summary(items):
     for row in items:
         r=row['result']
         if r.get('basis_pending'): c['PENDING']+=1
+        if row['input'].get('reference_origin'): c['plan_reference']+=1
         if r['data_status']=='ERROR': c['ERROR']+=1
         elif r['review_mode']=='AUTO': c[r['quantity_status']]+=1
         else: c[r['review_mode']]+=1
         if r.get('delay_replenishment'): c['delay']+=1
+        if r.get('turnover_warning'): c['turnover']+=1
         if business_warnings(row): c['attention']+=1
         if submission_issues(row['input'],r): c['unexplained']+=1
         if row.get('decision'): c['reviewed']+=1
@@ -99,6 +105,51 @@ def new_batch(db,user,data,*,copied_from=None):
 
 
 PLAN_FIELDS = ('sea_plan_qty','air_plan_qty','reason','reason_code','air_reason')
+REFERENCE_FIELDS = {
+    'material_name','material_type','vehicle_model','local_abc','material_abc','is_key_model',
+    'fleet_qty','vehicle_parc','future_fleet_qty','large_value_flag','monthly_sales','current_sales',
+    'shortage_qty','on_hand_qty','net_supply_before_plan','replacement_rate','replacement_target','sales_target',
+}
+SUPPLY_COMPONENTS = ('on_hand_qty','in_transit_qty','on_order_qty','demand_deduction_qty')
+
+
+def reference_changes(item, edits, components=False):
+    """Return only planner-owned inputs and any values derived from their edits."""
+    allowed = REFERENCE_FIELDS | (set(SUPPLY_COMPONENTS) if components else set())
+    demand(isinstance(edits,dict) and set(edits)<=allowed,'包含不可编辑的基础数据字段')
+    changes = {}
+    for key, raw in edits.items():
+        if key == 'monthly_sales':
+            demand(isinstance(raw,list) and len(raw)==6,'请按从早到晚提供六个月的销量')
+            demand(all(v is None or isinstance(v,(int,float,str)) and len(str(v))<=80 for v in raw),'月销量格式无效')
+            months = list(item.get('month_labels') or item.get('monthly_sales') or {})
+            if len(months)!=6:
+                months = [f'第{i}月销量' for i in range(1,7)]
+            changes[key] = dict(zip(months,map(canonical,raw)))
+            changes['month_labels'] = months
+            changes['avg_sales_3m'],changes['avg_sales_6m'] = v2_sales(raw[-3:]),v2_sales(raw)
+        else:
+            demand(raw is None or isinstance(raw,(str,float,int)) and len(str(raw))<=300,'基础字段格式无效')
+            if key == 'is_key_model':
+                demand(raw in (None,'') or boolean(raw) is not None,'请选择是否为重点车型')
+                changes[key] = boolean(raw)
+            elif key == 'replacement_rate' and raw not in (None,''):
+                try:
+                    changes[key] = serial(number(raw))
+                except ValueError as error:
+                    raise HTTPException(422,'更换率：'+str(error)) from error
+            else:
+                changes[key] = canonical(raw) or None
+    if components:
+        demand('net_supply_before_plan' not in edits,'分项库存的净额由系统计算')
+        if set(edits).intersection(SUPPLY_COMPONENTS):
+            combined = {**item,**changes}
+            try:
+                parts = [number(combined.get(k)) for k in SUPPLY_COMPONENTS]
+                changes['net_supply_before_plan'] = serial(parts[0]+parts[1]+parts[2]-parts[3]) if None not in parts else None
+            except ValueError:
+                changes['net_supply_before_plan'] = '分项数量无效'
+    return changes
 
 
 def plan_sources(db, version):
@@ -107,11 +158,15 @@ def plan_sources(db, version):
     return {i['material_code']: i for i in db.get(Snapshot, version.snapshot_id).items}
 
 
-def plan_input(plan, sources, *, replace_plan=False):
+def plan_input(plan, sources, *, replace_plan=False, previous=None):
     code=plan.get('material_code')
     demand(isinstance(code,str) and bool(code.strip()),'请输入物料号')
     code=code.strip()
-    if sources is None:
+    if previous and (sources is None or previous.get('reference_origin')):
+        inp=deepcopy(previous)
+        if not previous.get('reference_origin') and plan.get('material_name'):
+            inp['material_name']=str(plan['material_name']).strip()
+    elif sources is None:
         inp={'material_code':code,'material_name':str(plan.get('material_name') or '').strip(),
              'sea_plan_qty':'0','air_plan_qty':'0'}
     else:
@@ -124,25 +179,38 @@ def plan_input(plan, sources, *, replace_plan=False):
 
 
 def plan_result(item,rule,snapshot_id):
-    return pending_plan_result(item) if snapshot_id is None else calculate(item,rule.package)
+    if snapshot_id is not None or item.get('reference_origin'):
+        return calculate(item,rule.package)
+    result=pending_plan_result(item)
+    _,basis=apply_governance(item,rule.package)
+    if basis: result['master_basis']=basis
+    return result
 
 def patch_items(db,user,version_id,data):
     batch,ver=version_access(db,user,version_id);editable(user,batch,ver,data.get('revision'))
     rows=deepcopy(ver.items); by_id={r['id']:r for r in rows}; changes=data.get('changes',[])
     demand(isinstance(changes,list) and 0<len(changes)<=10000,'请选择要修改的计划行')
-    allowed={'sea_plan_qty','air_plan_qty','reason','reason_code','air_reason'}
+    rule=db.get(Rule,ver.rule_id)
+    snapshot=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None
     for change in changes:
         row=by_id.get(change.get('id')); demand(row is not None,'计划行不存在',404)
         values=change.get('values',{})
-        demand(set(values)<=allowed,'只能修改计划数量和说明；基础数据请更新快照')
+        demand(isinstance(values,dict) and set(values)<=set(PLAN_FIELDS),'包含不可编辑的计划字段')
         demand(all(len(str(v))<=2000 for v in values.values()),'说明文字过长')
         if 'reason_code' in values:
             values = {**values, 'reason_code': canonical_reason(values['reason_code'])}
+        refs=reference_changes(row['input'],change.get('reference',{}),bool(snapshot and snapshot.net_mode=='COMPONENTS'))
+        governed=set((row['result'].get('master_basis') or {}).get('values',{}))
+        locked=governed.intersection(refs)
+        demand(not locked,'这些字段由审核标准维护 · '+'、'.join(MASTER_FIELDS[k] for k in sorted(locked)))
+        if any(row['input'].get(k)!=v for k,v in refs.items()):
+            row['input']['reference_origin']='planner'
+        values={**values,**refs}
         before={k:row['input'].get(k) for k in values};before_result=deepcopy(row['result'])
         if any(row['input'].get(k)!=v for k,v in values.items()):
             row['decision']=None
         row['input'].update(values);row.pop('submission_override',None)
-        row['result']=plan_result(row['input'],db.get(Rule,ver.rule_id),ver.snapshot_id)
+        row['result']=plan_result(row['input'],rule,ver.snapshot_id)
         row['adjustment']={'at':now(),'before':before,'after':deepcopy(values),'quantity_before':before_result['quantity_status'],'quantity_after':row['result']['quantity_status'],'review_reason':bool(row['input'].get('reason')) and any(k in values for k in ('sea_plan_qty','air_plan_qty'))}
     ver.items=rows; batch.updated_at=now()
     audit(db,user,'修改计划',batch.warehouse,batch.id,ver.id,changes=changes)
@@ -156,9 +224,13 @@ def add_items(db,user,version_id,data):
     demand(isinstance(plans,list) and plans and all(isinstance(i,dict) for i in plans),'请选择要添加的物料')
     demand(len(rows)+len(plans)<=10000,'单批最多10000行')
     rule=db.get(Rule,ver.rule_id)
+    snapshot=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None
     for plan in plans:
         inp=plan_input(plan,sources);code=inp['material_code']
         demand(code not in codes,'同一计划不能重复添加物料：'+code)
+        if plan.get('reference'):
+            inp.update(reference_changes(inp,plan['reference'],bool(snapshot and snapshot.net_mode=='COMPONENTS')))
+            inp['reference_origin']='planner'
         rows.append({'id':uid(),'input':inp,'result':plan_result(inp,rule,ver.snapshot_id),'decision':None});codes.add(code)
     ver.items=rows;batch.updated_at=now();audit(db,user,'添加计划行',batch.warehouse,batch.id,ver.id,count=len(rows));db.flush()
     return {'revision':ver.revision,'summary':summary(rows)}
@@ -196,7 +268,7 @@ ACTIVE_REVIEW_STATES = ('SUBMITTED','IN_REVIEW')
 
 
 def eligible_reviewer(user,batch):
-    return bool(user and user.active and user.id!=batch.owner and 'REVIEWER' in user.roles and batch.warehouse in user.warehouses)
+    return bool(user and user.active and user.id!=batch.owner and has_role(user,'REVIEWER') and batch.warehouse in user.warehouses)
 
 
 def assignment(db,batch,ver):
@@ -353,6 +425,14 @@ def basis_candidate(db,user,version_id,data,lock=False):
     demand(rule is not None and rule.state=='PUBLISHED','请选择已发布规则')
     allowed_rule=active_rule(db,batch.warehouse)
     demand(rule.id in (ver.rule_id,allowed_rule.id),'该规则没有绑定当前仓库')
+    if snapshot_id is None or snapshot_id==ver.snapshot_id:
+        demand(snapshot is not None or ver.snapshot_id is None,'请选择本仓快照')
+        rows=deepcopy(ver.items)
+        for row in rows:
+            row['result']=plan_result(row['input'],rule,ver.snapshot_id)
+            row['decision']=None
+            row.pop('submission_override',None)
+        return batch,ver,rule,snapshot,rows
     demand(snapshot is not None and snapshot.warehouse==batch.warehouse,'请选择本仓快照')
     sources={i['material_code']:i for i in snapshot.items};rows=deepcopy(ver.items)
     for row in rows:
@@ -370,7 +450,7 @@ def preview_basis(db,user,version_id,data):
     batch,ver,rule,snapshot,rows=basis_candidate(db,user,version_id,data)
     changes=compare_items(ver.items,rows)
     return {
-        'revision':ver.revision,'snapshot':{'id':snapshot.id,'name':snapshot.name,'as_of':snapshot.as_of,'basis':snapshot.basis,'net_mode':snapshot.net_mode},
+        'revision':ver.revision,'snapshot':{'id':snapshot.id,'name':snapshot.name,'as_of':snapshot.as_of,'basis':snapshot.basis,'net_mode':snapshot.net_mode} if snapshot else None,
         'rule':{'id':rule.id,'name':rule.name},'total':len(rows),'affected_count':len(changes['items']),
         'quantity_changed_count':changes['summary']['quantity_changed'],'data_changed_count':changes['summary']['data_changed'],
         'before_summary':summary(ver.items),'after_summary':summary(rows),'items':changes['items'],
@@ -379,6 +459,6 @@ def preview_basis(db,user,version_id,data):
 
 def switch_basis(db,user,version_id,data):
     batch,ver,rule,snapshot,rows=basis_candidate(db,user,version_id,data,lock=True)
-    audit(db,user,'切换计算依据',batch.warehouse,batch.id,ver.id,old_rule=ver.rule_id,new_rule=rule.id,old_snapshot=ver.snapshot_id,new_snapshot=snapshot.id)
-    ver.items=rows;ver.rule_id=rule.id;ver.snapshot_id=snapshot.id;batch.updated_at=now()
+    audit(db,user,'切换计算依据',batch.warehouse,batch.id,ver.id,old_rule=ver.rule_id,new_rule=rule.id,old_snapshot=ver.snapshot_id,new_snapshot=snapshot.id if snapshot else None)
+    ver.items=rows;ver.rule_id=rule.id;ver.snapshot_id=snapshot.id if snapshot else None;batch.updated_at=now()
     db.flush();return {'revision':ver.revision}

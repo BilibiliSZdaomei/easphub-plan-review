@@ -3,7 +3,7 @@ import {ChevronLeft,ChevronRight} from 'lucide-react'
 import {api,flagLabels,fmt,labels} from './api'
 import {Busy,Notice} from './ui'
 
-type Outcome = {lower:number|null;upper:number|null;status:string;review_mode?:string;data_status?:string;flags?:string[];delay?:boolean}
+type Outcome = {replacement_rate?:string;replacement_target?:string;sales_target?:string;lower:number|null;upper:number|null;status:string;review_mode?:string;data_status?:string;flags?:string[];delay?:boolean;future_qty?:string|null;turnover_warning?:string|null}
 type Impact = {material_code:string;material_name?:string;before:Outcome;after:Outcome;new_error_messages?:string[]}
 type Result = {items:Impact[];total:number;recorded:number;changed:number;page_size:number}
 type Trial = {at:string;rows:number;changed:number;new_errors:string[];baseline_name?:string;snapshot_name?:string}
@@ -19,6 +19,11 @@ function outcomeChanges({before,after,new_error_messages}:Impact) {
    rows.push([label,display(before[field]),display(after[field])])
   }
  }
+ for(const [key,label] of [['replacement_rate','更换率'],['replacement_target','更换率目标'],['sales_target','销量目标']] as const) {
+  if(before[key]!==after[key])rows.push([label,before[key]??'—',after[key]??'—'])
+ }
+ if(before.future_qty!==after.future_qty) rows.push(['未来库存',fmt(before.future_qty),fmt(after.future_qty)])
+ if(before.turnover_warning!==after.turnover_warning) rows.push(['周转预警',before.turnover_warning||'—',after.turnover_warning||'—'])
  if (!!before.delay!==!!after.delay) rows.push(['建议延迟补货',before.delay?'是':'否',after.delay?'是':'否'])
  const flags=(value?:string[])=>value?.length?value.map(key=>flagLabels[key]||key).join('、'):'无'
  if(flags(before.flags)!==flags(after.flags))rows.push(['人工关注',flags(before.flags),flags(after.flags)])

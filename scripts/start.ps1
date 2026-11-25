@@ -1,4 +1,4 @@
-﻿param([switch]$NoBrowser)
+param([switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
 $projectPath = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'runtime.ps1')
@@ -41,20 +41,20 @@ if (-not (Test-Path -LiteralPath $stampPath) -or (Get-Content -LiteralPath $stam
     if ($LASTEXITCODE -ne 0) { throw '安装依赖失败。请检查网络后重新启动。' }
     Set-Content -LiteralPath $stampPath -Value $lockHash -Encoding ASCII
 }
-function Test-V2Frontend([string]$Directory) {
+function Test-PlanFrontend([string]$Directory) {
     $manifest = Join-Path $Directory 'app-build.json'
     if (-not (Test-Path -LiteralPath $manifest) -or -not (Test-Path -LiteralPath (Join-Path $Directory 'index.html'))) { return $false }
     try {
         $build = Get-Content -LiteralPath $manifest -Raw -Encoding utf8 | ConvertFrom-Json
         $expected = Get-Content -LiteralPath (Join-Path $projectPath 'frontend\package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        return $build.version -eq $expected.version -and $build.review_model -eq 'V2' -and $build.market_scope -eq 'EUROPE' -and $build.account_mode -eq 'managed' -and $build.ui_revision -eq 5
+        return $build.version -eq $expected.version -and $build.review_model -eq 'V3' -and $build.market_scope -eq 'EUROPE' -and $build.account_mode -eq 'managed' -and $build.ui_revision -eq 10
     }
     catch { return $false }
 }
 $externalUI = Join-Path $dependencyEnvironment.Frontend 'dist'
 $bundledUI = Join-Path $projectPath 'frontend\dist'
-if (Test-V2Frontend $externalUI) { $env:PLAN_REVIEW_UI_DIR = $externalUI }
-elseif (Test-V2Frontend $bundledUI) { $env:PLAN_REVIEW_UI_DIR = $bundledUI }
+if (Test-PlanFrontend $externalUI) { $env:PLAN_REVIEW_UI_DIR = $externalUI }
+elseif (Test-PlanFrontend $bundledUI) { $env:PLAN_REVIEW_UI_DIR = $bundledUI }
 else {
     if (-not (Test-Path -LiteralPath (Join-Path $dependencyEnvironment.Frontend 'node_modules\vite\bin\vite.js'))) {
         & (Join-Path $PSScriptRoot 'frontend.ps1') -Action Install

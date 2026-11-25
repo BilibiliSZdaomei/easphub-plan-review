@@ -3,9 +3,12 @@ from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING, ROUND_FLOOR, localcontext
 import hashlib
 import json
+from .numbers import number, serial
+from .governance import apply_governance, check_governance
 
 PRECISION_VERSION = "UK0804-decimal-10-half-up-v1"
 MODEL_V2 = "V2"
+MODEL_V3 = "V3"
 REASON_LABELS = {
     "市场需求变化": "预计用量有变化",
     "已确认特殊订单": "已有订单要交付",
@@ -25,6 +28,7 @@ DELAY_DEFAULTS = {
     "delay_on_hand_months": 4, "delay_net_months": 9,
     "delay_vehicle_parc": 10000, "small_delay_qty": 150,
 }
+TURNOVER_DEFAULTS = {"turnover_low_months": 3, "turnover_high_months": 9}
 DEFAULTS = {
     "fixed_ab": 12, "fixed_non_ab": 3, "fleet_low_threshold": 1000,
     "target_ratio_threshold": 1.5, "upper_months_key": 15, "upper_months_non_key": 12,
@@ -51,12 +55,15 @@ PARAM_LABELS = {
     "small_display_upper": "小件参考上限（免数量审核）",
     "delay_on_hand_months": "延迟补货 · 在库月数", "delay_net_months": "延迟补货 · 净库存月数",
     "delay_vehicle_parc": "延迟补货 · 最低备件保有量", "small_delay_qty": "小件延迟补货 · 最低净库存",
+    "turnover_low_months": "周转过低（月）", "turnover_high_months": "周转过高（月）",
 }
 FLAG_LABELS = {"AIR": "空运必要性待确认", "COLLISION": "特殊分类重叠", "MISSING_RATE": "缺更换率且目标为零",
                "NO_SEA_RANGE": "仅调整海运无法达标", "ABC_MISSING": "物料分类缺失", "MANUAL": "按市场需求人工判断"}
 
 def default_package(model=MODEL_V2):
     package = {"params": deepcopy(DEFAULTS), "keywords": deepcopy(KEYWORDS), "overrides": {}, "precision_version": PRECISION_VERSION}
+    if model == MODEL_V3:
+        return upgrade_to_v3(package)
     return upgrade_to_v2(package) if model == MODEL_V2 else package
 
 def upgrade_to_v2(package):
@@ -65,28 +72,15 @@ def upgrade_to_v2(package):
     updated["params"] = {**DELAY_DEFAULTS, **updated["params"]}
     return updated
 
+def upgrade_to_v3(package):
+    updated = upgrade_to_v2(package)
+    updated["model"] = MODEL_V3
+    updated["params"] = {**TURNOVER_DEFAULTS, **updated["params"]}
+    return updated
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
 
-def number(value):
-    if value is None or str(value).strip().lower() in ("", "none", "null", "nan", "nat"):
-        return None
-    if isinstance(value, bool):
-        raise ValueError("布尔值不能作为数量")
-    try:
-        text = str(value).strip()
-        n = Decimal(text[:-1]) / 100 if text.endswith("%") else Decimal(text)
-        if not n.is_finite() or abs(n) > Decimal("1e12"):
-            raise ValueError("数值超出允许范围")
-        return n
-    except (InvalidOperation, ValueError):
-        raise ValueError("请输入有效数字，不能使用问号或说明文字")
-
-def serial(n):
-    if n is None:
-        return None
-    s = format(n, "f")
-    return s.rstrip("0").rstrip(".") if "." in s else s
 
 def uk_round(n):
     # Normalize Excel's serialized input tails at a single versioned boundary.
@@ -96,18 +90,23 @@ def validate_package(package):
     if not isinstance(package, dict):
         return ["规则参数格式有误"]
     errors = []
-    if set(package) - {"params", "keywords", "overrides", "model", "precision_version"}:
+    if set(package) - {"params", "keywords", "overrides", "model", "precision_version", "master_data", "target_policy"}:
         errors.append("含有不支持的规则字段")
     if package.get("precision_version") != PRECISION_VERSION:
         errors.append("精度策略必须使用受支持的版本")
-    if package.get("model", "0804") not in ("0804", MODEL_V2):
+    model = package.get("model", "0804")
+    if model not in ("0804", MODEL_V2, MODEL_V3):
         errors.append("审核规则版本无效")
     params = package.get("params")
     keywords = package.get("keywords")
     overrides = package.get("overrides", {})
     if not all(isinstance(section, dict) for section in (params, keywords, overrides)):
         return errors + ["参数、关键词和物料类型覆盖必须按字段填写"]
-    keys = [*DEFAULTS, *DELAY_DEFAULTS] if package.get("model") == MODEL_V2 else DEFAULTS
+    keys = list(DEFAULTS)
+    if model in (MODEL_V2, MODEL_V3):
+        keys.extend(DELAY_DEFAULTS)
+    if model == MODEL_V3:
+        keys.extend(TURNOVER_DEFAULTS)
     if set(params).difference(keys):
         errors.append("含有所选模型不支持的参数")
     if set(keywords).difference(KEYWORDS):
@@ -123,6 +122,8 @@ def validate_package(package):
                 errors.append(f"{PARAM_LABELS[key]}超出范围")
         except (InvalidOperation, ValueError):
             errors.append(f"{PARAM_LABELS[key]}不是有效数字")
+    if model == MODEL_V3 and not errors and Decimal(str(params["turnover_low_months"])) >= Decimal(str(params["turnover_high_months"])):
+        errors.append("周转过低月数必须小于过高月数")
     for group in KEYWORDS:
         words = keywords.get(group)
         if not isinstance(words, list) or not words or len(words) > 100:
@@ -132,12 +133,14 @@ def validate_package(package):
     for code, group in overrides.items():
         if not isinstance(code, str) or not code.strip() or group not in (*KEYWORDS, "normal"):
             errors.append("物料类型覆盖无效")
-    return errors
+    return errors + check_governance(package)
 
-def turnover_and_delay(fields, m, future, small, maintenance, params):
+def turnover_and_delay(fields, m, future, small, maintenance, params, v3=False):
     stock = fields["on_hand_qty"]
     net = fields["net_supply_before_plan"]
     parc = fields["vehicle_parc"]
+    if v3 and parc is None:
+        parc = fields["fleet_qty"]
     six_months = fields["avg_sales_6m"]
     def months(qty):
         return qty / m if qty is not None and m and m > 0 else None
@@ -154,8 +157,18 @@ def turnover_and_delay(fields, m, future, small, maintenance, params):
             precision.prec = max(precision.prec, 36)
             delay = (stock > round(m * params["delay_on_hand_months"], 10)
                      and net > round(m * params["delay_net_months"], 10))
-    return {"on_hand_months": serial(on_hand), "pipeline_days": serial(pipeline * 30) if pipeline is not None else None,
-            "future_days": serial(after * 30) if after is not None else None, "delay_replenishment": delay}
+    timing = {"on_hand_months": serial(on_hand), "pipeline_days": serial(pipeline * 30) if pipeline is not None else None,
+              "future_days": serial(after * 30) if after is not None else None, "delay_replenishment": delay}
+    if v3:
+        warning = None
+        if not small and after is not None:
+            # Compare units at workbook precision so an exact 3 or 9 months stays in range.
+            if future < round(m * params["turnover_low_months"], 10):
+                warning = "周转过低"
+            elif future > round(m * params["turnover_high_months"], 10):
+                warning = "周转过高"
+        timing["turnover_warning"] = warning
+    return timing
 
 def quantity_advice(mode, status, gap, unit, delay):
     if status == "UNAVAILABLE":
@@ -187,7 +200,7 @@ def pending_plan_result(item):
                 flags.append('AIR')
         except ValueError as exc:
             errors.append({'field': key, 'message': label + '：' + str(exc)})
-    message = '缺少本仓审核数据，需人工复审'
+    message = '待补本行基础数据，需人工复审'
     return {
         'basis_pending': True, 'data_status': 'ERROR' if errors else 'PENDING',
         'review_mode': 'MANUAL', 'quantity_status': 'UNAVAILABLE', 'rule_id': '',
@@ -205,7 +218,9 @@ def pending_plan_result(item):
 
 def calculate(item, package=None):
     package = package or default_package()
-    v2 = package.get("model") == MODEL_V2
+    item, master_basis = apply_governance(item, package)
+    v3 = package.get("model") == MODEL_V3
+    v2 = package.get("model") in (MODEL_V2, MODEL_V3)
     p = {k: Decimal(str(v)) for k, v in package["params"].items()}
     errors, flags, warnings = [], [], []
     fields = {}
@@ -234,6 +249,8 @@ def calculate(item, package=None):
     if not str(item.get("material_name") or "").strip() and not str(item.get("material_type") or "").strip():
         errors.append({"field": "material_name", "message": "缺少物料名称或类型，无法识别分类"})
     require("net_supply_before_plan", "sea_plan_qty", "air_plan_qty", "quantity_step")
+    if v3:
+        require("on_hand_qty")
     if item.get('uom','PCS') not in ('PCS','EA','SET','L','KG','M'):
         errors.append({'field':'uom','message':'计量单位不在标准合同内，请统一为PCS/EA、SET、L、KG或M并确认数量换算'})
     if fields["quantity_step"] is not None and fields["quantity_step"] <= 0:
@@ -322,7 +339,9 @@ def calculate(item, package=None):
         if lower > upper:
             errors.append({"field": "rule", "message": "库存下限高于上限，请由规则负责人检查参数"})
     t, sea, air = (fields[k] for k in ("net_supply_before_plan", "sea_plan_qty", "air_plan_qty"))
-    future = t + sea + air if all(v is not None for v in (t, sea, air)) else None
+    additional_supply = fields["on_hand_qty"] if v3 else air
+    base_supply = t + additional_supply if t is not None and additional_supply is not None else None
+    future = base_supply + sea if base_supply is not None and sea is not None else None
     status, gap, feasible, sea_l, sea_u, suggested, residual = "UNAVAILABLE", None, None, None, None, None, None
     if not errors:
         if mode != "AUTO":
@@ -330,7 +349,6 @@ def calculate(item, package=None):
         elif lower is not None and upper is not None and future is not None:
             status = "BELOW" if future < lower else "ABOVE" if future > upper else "WITHIN"
             gap = lower-future if status == "BELOW" else future-upper if status == "ABOVE" else Decimal(0)
-            base_supply = t + air
             step = fields["quantity_step"]
             lo = (max(Decimal(0), lower-base_supply)/step).to_integral_value(rounding=ROUND_CEILING)*step
             hi = ((upper-base_supply)/step).to_integral_value(rounding=ROUND_FLOOR)*step
@@ -344,10 +362,13 @@ def calculate(item, package=None):
                 flags.append("NO_SEA_RANGE")
     timing = {}
     if v2:
-        timing = turnover_and_delay(fields, m, future, small, maintenance, p)
+        timing = turnover_and_delay(fields, m, future, small, maintenance, p, v3)
         timing["advice"] = quantity_advice(mode, status, gap, item.get("uom") or "PCS", timing["delay_replenishment"])
+        if timing.get("turnover_warning"):
+            timing["advice"] += "；" + timing["turnover_warning"] + "预警"
     return {
         **timing,
+        **({'master_basis': master_basis} if master_basis else {}),
         "data_status": "ERROR" if errors else "WARNING" if warnings or "MISSING_RATE" in flags else "VALID",
         "review_mode": mode, "quantity_status": status, "rule_id": rule_id,
         "lower_raw": serial(raw_l), "upper_raw": serial(raw_u), "lower": serial(lower), "upper": serial(upper),

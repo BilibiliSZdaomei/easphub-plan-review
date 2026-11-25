@@ -38,6 +38,38 @@ import_images() {
         actual=$(printf '%s\n' "$layers" | sha256sum | cut -d' ' -f1)
         [ "$actual" = "$expected" ] || die "镜像校验失败 $img"
     done < "$release_dir/IMAGE-IDS"
+    app_image=$(awk '$1 ~ /^easphub-plan-review-app:[0-9]+\.[0-9]+\.[0-9]+$/ {print $1}' "$release_dir/IMAGE-IDS")
+    [ -n "$app_image" ] && [ "$(printf '%s\n' "$app_image" | wc -l)" -eq 1 ] || die '包内缺少唯一的应用镜像版本。'
+}
+backup_before_upgrade() {
+    backup_dir="${state_dir}.backups"
+    [ ! -L "$backup_dir" ] || die '冷备目录须为实际路径。'
+    mkdir -p "$backup_dir"
+    [ "$(realpath "$backup_dir")" = "$backup_dir" ] || die '冷备目录须为实际路径。'
+    chmod 700 "$backup_dir"
+    # Archive the state directory and any externally configured bind mounts.
+    set -- "${state_dir#/}"
+    for field in APP_DATA_HOST_PATH MYSQL_DATA_HOST_PATH DATABASE_PASSWORD_FILE DATABASE_ROOT_PASSWORD_FILE MYSQL_CLIENT_FILE; do
+        input=$(sed -n "s/^$field=//p" "$config")
+        case "$input" in /|*/../*|*/..|''|*[!A-Za-z0-9_./-]*) die "冷备无法识别 $field 路径。";; /*) ;; *) die "冷备需要绝对路径 $field。";; esac
+        [ -e "$input" ] && [ "$(realpath "$input")" = "$input" ] || die "冷备找不到实际路径 $field。"
+        case "$backup_dir/" in "$input/"*) die '冷备目录位于业务数据路径内。';; esac
+        case "$input" in "$state_dir"|"$state_dir"/*) ;; *) set -- "$@" "${input#/}";; esac
+    done
+    tmp=$(mktemp "$backup_dir/.pending.XXXXXXXX")
+    running_services=$(compose ps --services --status running)
+    compose stop web worker database
+    if tar -C / -czf "$tmp" "$@" && tar -tzf "$tmp" >/dev/null; then
+        backup="$backup_dir/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ)-${tmp##*.}.tar.gz"
+        mv "$tmp" "$backup"
+        (cd "$backup_dir" && sha256sum "${backup##*/}" > "${backup##*/}.sha256")
+        printf '升级前冷备已保存 %s\n' "$backup"
+    else
+        rm -f "$tmp"
+        # Before migration the old configuration is still usable.
+        if [ -n "$running_services" ]; then compose start $running_services; fi
+        die '冷备失败；数据库未迁移。请核对备份空间和读取权限。'
+    fi
 }
 random_secret() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
 create_secret() {
@@ -70,7 +102,7 @@ if [ "$action" = install ]; then
             mv "$state_dir/secrets/initial-admin-password.new" "$state_dir/secrets/initial-admin-password"
         fi
         cat > "$config.new" <<ENV
-APP_IMAGE=easphub-plan-review-app:2.1.0
+APP_IMAGE=$app_image
 MYSQL_IMAGE=easphub-plan-review-mysql:8.4.8
 TZ=Europe/Budapest
 APP_DATA_HOST_PATH=$state_dir/app
@@ -86,16 +118,16 @@ ENV
     proxy_network=$(sed -n 's/^PROXY_NETWORK=//p' "$config")
     docker network inspect "$proxy_network" >/dev/null 2>&1 || docker network create "$proxy_network" >/dev/null
     compose config --quiet
-    compose up -d --wait --wait-timeout 300 database
-    # A previous installation keeps its network, secrets and volume locations.
-    # Stop writers before schema migration, then switch to the images in this kit.
-    if ! grep -qx 'APP_IMAGE=easphub-plan-review-app:2.1.0' "$config"; then
-        compose stop web worker
+    if ! grep -Fxq "APP_IMAGE=$app_image" "$config"; then
         grep -q '^APP_IMAGE=' "$config" || die '现有配置缺少 APP_IMAGE。'
-        sed 's|^APP_IMAGE=.*$|APP_IMAGE=easphub-plan-review-app:2.1.0|' "$config" > "$config.new"
+        backup_before_upgrade
+        sed "s|^APP_IMAGE=.*$|APP_IMAGE=$app_image|" "$config" > "$config.new"
         mv "$config.new" "$config"
     fi
+    compose up -d --wait --wait-timeout 300 database
     compose run --rm --no-deps -T migrate
+    admin_input="$state_dir/secrets/initial-admin-password"
+    [ -s "$admin_input" ] || admin_input=/dev/null
     compose run --rm --no-deps -T migrate python -c '
 from pathlib import Path
 import sys
@@ -107,7 +139,7 @@ with transaction() as db:
 if not existing:
     bootstrap("admin", "系统管理员", sys.stdin.readline().strip(), warehouse_config())
     print("初始管理员已建立。")
-' < "$state_dir/secrets/initial-admin-password"
+' < "$admin_input"
     compose up -d --wait --wait-timeout 300 database web worker
     printf '%s\n' '服务已就绪。首次登录账号 admin，请由管理员读取本机密码文件。' "$state_dir/secrets/initial-admin-password"
 else

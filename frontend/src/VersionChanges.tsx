@@ -25,7 +25,7 @@ type Diff = {
 const fieldLabels: Record<string,string> = {
   material_name:'物料名称', material_type:'物料类型', material_abc:'物料 ABC', local_abc:'本地 ABC',
   vehicle_model:'车型', vehicle_parc:'备件保有量', source_note:'备注', monthly_sales:'逐月销量',
-  on_hand_months:'在库周转（月）', pipeline_days:'净库存周转（天）', future_days:'补货后周转（天）', delay_replenishment:'建议延迟补货', advice:'审批建议',
+  on_hand_months:'在库周转（月）', pipeline_days:'净库存周转（天）', future_days:'补货后周转（天）', turnover_warning:'周转预警', future_fleet_qty:'未来装车量', delay_replenishment:'建议延迟补货', advice:'审批建议',
   is_key_model:'重点车型', fleet_qty:'装车量', avg_sales_3m:'近 3 月月均销量', avg_sales_6m:'近 6 月月均销量',
   replacement_rate:'稳态更换率', replacement_target:'更换率目标库存', sales_target:'销量目标库存',
   net_supply_before_plan:'审核前净额', sea_plan_qty:'海运计划', air_plan_qty:'空运计划', on_hand_qty:'在库数量',
@@ -37,7 +37,7 @@ const fieldLabels: Record<string,string> = {
   quantity_gap:'偏离数量', sea_feasible:'海运可调至区间内', sea_lower:'海运下限', sea_upper:'海运上限',
   suggested_sea_qty:'建议海运量', residual_excess:'剩余超量', manual_flags:'人工关注', errors:'数据错误',
   warnings:'提醒', matched_keywords:'命中关键词', override:'物料分类覆盖', explanation:'计算依据',
-  m:'月均销量参考值', precision_version:'精度版本', status:'复审结论', reviewer_id:'复审人编号',
+  master_basis:'物料与目标依据',master_fields:'主数据字段',values:'生效值',targets:'计算口径',source_targets:'来源目标',months:'储备月数',rounding:'取整方式',window:'销量窗口',fallback:'沿用来源目标',m:'月均销量参考值', precision_version:'精度版本', status:'复审结论', reviewer_id:'复审人编号',
   reviewer_name:'复审人', reviewed_at:'复审时间', ack_flags:'已确认关注项', air_confirmed:'已确认空运',
   forced:'例外终审', data_error_accepted:'已接受数据错误', issues:'待处理问题', user_id:'操作人编号',
   user_name:'操作人', at:'确认时间', affected_count:'涉及物料数', stage:'环节',

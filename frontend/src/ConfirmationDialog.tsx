@@ -62,7 +62,7 @@ export default function ConfirmationDialog({kind,ver,onClose,onConfirm,onItem}:{
     {error&&<Notice message={error} tone="error"/>}
     {!report?(error?<button type="button" className="text-button" onClick={()=>setAttempt(n=>n+1)}>刷新提醒</button>:<Busy/>):<>
       <p>第 {ver.seq} 版，共 <strong>{report.total}</strong> 行。{submitting?'提交后由本仓复审人员领取。':`本次结案：通过 ${report.total-report.rejected} 行，不批准 ${report.rejected} 行。`}</p>
-      {!ver.snapshot&&<Notice message="本版采用人工复审，库存、周转和补货区间均未计算。" tone="info"/>}
+      {ver.summary.PENDING>0&&<Notice message={ver.summary.PENDING+' 行尚缺基础数据，需人工核对。'} tone="info"/>}
       {hasIssues&&<Notice message={`其中 ${report.affected_count} 行有审核提醒，可继续${submitting?'提交':'终审'}。`}/>}
       {!submitting&&report.unreviewed>0&&<p className="muted">{report.unreviewed} 行尚未单独复审，将记为「整批通过」。</p>}
       {hasIssues&&<IssueList key={report.issue_hash} report={report} disabled={busy} onItem={editIssue}/>}

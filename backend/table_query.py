@@ -3,6 +3,7 @@ import json
 from fastapi import HTTPException
 from .rules import number, FLAG_LABELS, submission_issues
 from .exceptions import business_warnings
+from .governance import effective_input
 
 COLUMNS = [
  ('material_code','物料号','text'),('material_name','物料名称','text'),('material_abc','物料分类ABC','enum'),('vehicle_model','车型','text'),
@@ -10,6 +11,7 @@ COLUMNS = [
  ('future_qty','未来库存','number'),('lower','库存下限','number'),('upper','库存上限','number'),
  ('status','系统结论','enum'),('attention','人工关注','text'),('m','月均销量最大值','number'),
  ('on_hand_months','在库周转（月）','number'),('pipeline_days','净库存周转（天）','number'),('future_days','补货后周转（天）','number'),
+ ('turnover_warning','周转预警','enum'),('future_fleet_qty','未来装车量','number'),
  ('delay_replenishment','建议延迟补货','enum'),('advice','审批建议','text'),('vehicle_parc','备件保有量','number'),('source_note','备注','text'),('is_key_model','是否重点车型','enum'),
  ('avg_sales_3m','三个月月均销量','number'),('avg_sales_6m','六个月月均销量','number'),('fleet_qty','装车量','number'),
  ('on_hand_qty','在库数量','number'),('in_transit_qty','在途数量','number'),('on_order_qty','在订数量','number'),
@@ -34,7 +36,7 @@ def decision_label(decision, version_state=None):
 
 
 def display_row(row, version_state=None):
-    i=row['input'];r=row['result'];d=row.get('decision') or {}
+    i=effective_input(row);r=row['result'];d=row.get('decision') or {}
     status=r['data_status'] if r['data_status'] in ('ERROR','PENDING') else r['review_mode'] if r['review_mode']!='AUTO' else r['quantity_status']
     values={**i,**r,'status':STATUS.get(status,status),'attention':'；'.join(FLAG_LABELS.get(f,f) for f in r['manual_flags']),
             'is_key_model':'是' if i.get('is_key_model') is True else '否' if i.get('is_key_model') is False else None,
@@ -65,9 +67,10 @@ def query_items(items,q='',filter='all',column_filters=None,sort_key='',sort_dir
     if sort_direction not in ('asc','desc'):raise HTTPException(422,'排序方向无效')
     rows=[]
     for row in items:
-        r=row['result'];i=row['input']
+        r=row['result'];i=effective_input(row)
         if q.casefold() not in (i['material_code']+' '+str(i.get('material_name') or '')).casefold():continue
         if filter=='delay' and not r.get('delay_replenishment'):continue
+        if filter=='turnover' and not r.get('turnover_warning'):continue
         if filter=='attention' and not business_warnings(row):continue
         if filter=='unexplained' and not submission_issues(i,r):continue
         if filter=='pending' and row.get('decision'):continue

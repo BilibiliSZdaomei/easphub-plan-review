@@ -11,6 +11,8 @@ def business_warnings(row):
         issues.append({'field':'quantity', 'message':quantity})
     if result.get('delay_replenishment'):
         issues.append({'field':'delay', 'message':'建议延迟补货'})
+    if result.get('turnover_warning'):
+        issues.append({'field':'turnover_warning', 'message':result['turnover_warning']})
     for flag in result['manual_flags']:
         issues.append({'field':flag, 'message':FLAG_LABELS.get(flag, flag)})
     if result['review_mode']=='MANUAL' and not result.get('basis_pending') and 'MANUAL' not in result['manual_flags']:

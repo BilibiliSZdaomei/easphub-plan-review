@@ -1,5 +1,8 @@
 """Read-only comparisons shared by basis previews and version history."""
 
+from .governance import effective_input
+
+
 def changed_fields(before, after, skip=()):
     before, after = before or {}, after or {}
     return {
@@ -18,7 +21,7 @@ def compare_items(previous, current):
               'data_changed': 0, 'decision_changed': 0}
     for code in sorted(set(old_rows) | set(new_rows)):
         old, new = old_rows.get(code), new_rows.get(code)
-        before, after = (old or {}).get('input', {}), (new or {}).get('input', {})
+        before, after = effective_input(old) if old else {}, effective_input(new) if new else {}
         old_result, new_result = (old or {}).get('result', {}), (new or {}).get('result', {})
         fields = changed_fields(before, after, ('source', 'source_values', 'source_update', 'plan_source', 'material_code'))
         result_fields = changed_fields(old_result, new_result, ('input_hash',))

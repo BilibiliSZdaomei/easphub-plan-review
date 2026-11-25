@@ -14,6 +14,7 @@ import subprocess
 import time
 from urllib.error import URLError
 from urllib.request import build_opener, HTTPCookieProcessor, ProxyHandler, Request
+from xml.etree import ElementTree
 import zipfile
 
 
@@ -104,7 +105,7 @@ def smoke(archive, workdir):
                 login_body = json.loads(subprocess.check_output([str(shell),'-NoProfile','-Command',cmd],
                                            env={**env,'SMOKE_CARD':str(card)}))
                 session = json.loads(fetch('api/v1/sessions',login_body,{'Content-Type':'application/json'}))
-                assert 'ADMIN' in session['user']['roles']
+                assert session['user']['roles'] == ['ADMIN']
                 assert len(json.loads(fetch('api/v1/warehouses'))) == 10
                 assert json.loads(fetch('api/v1/snapshots')) == []
                 assert json.loads(fetch('api/v1/batches')) == []
@@ -114,11 +115,24 @@ def smoke(archive, workdir):
                     with zipfile.ZipFile(BytesIO(payload)) as xlsx:
                         assert xlsx.testzip() is None
                         assert 'xl/workbook.xml' in xlsx.namelist()
+                        if kind == 'plan':
+                            for comments in ('xl/comments/comment1.xml','xl/comments/comment2.xml'):
+                                assert len(ElementTree.fromstring(xlsx.read(comments)).findall('.//{*}comment')) == 7
+                payload = fetch('api/v1/template?kind=v3&period=2026-02')
+                with zipfile.ZipFile(BytesIO(payload)) as xlsx:
+                    assert xlsx.testzip() is None
+                    with xlsx.open('xl/worksheets/sheet1.xml') as sheet:
+                        header = next(element for _, element in ElementTree.iterparse(sheet) if element.tag.endswith('}row'))
+                    header_text = {cell.get('r'): ''.join(cell.itertext()) for cell in header}
+                    months = ('2025-08','2025-09','2025-10','2025-11','2025-12','2026-01')
+                    assert [header_text[column+'1'] for column in 'NOPQRS'] == [month+' 销量' for month in months]
+                    assert len(ElementTree.fromstring(xlsx.read('xl/comments/comment1.xml')).findall('.//{*}comment')) == 43
                 assert '物料号' in fetch('api/v1/template?kind=standard').decode('utf-8-sig')
                 fetch('api/v1/sessions/current',headers={'X-CSRF-Token':session['csrf']},method='DELETE')
                 with sqlite3.connect((data/'plan-review.sqlite3').as_uri()+'?mode=ro',uri=True) as db:
                     assert db.execute('SELECT count(*) FROM users').fetchone()[0] == 1
-                    assert db.execute('SELECT count(*) FROM rules WHERE active=1').fetchone()[0] == 1
+                    assert db.execute('SELECT version_num FROM alembic_version').fetchone() == ('0006',)
+                    assert db.execute("SELECT json_extract(package,'$.model') FROM rules WHERE active=1").fetchall() == [('V3',)]
             finally:
                 if process.poll() is None:
                     try:
@@ -137,7 +151,7 @@ def smoke(archive, workdir):
                 raise RuntimeError('Smoke server did not stop')
     print(json.dumps({'two_launches': True,'empty_snapshot_list': True,'warehouses':10,'accounts':1,
                       'version':health['version'],'python':json.loads((app/'versions.json').read_text())['python'],
-                      'template_and_assets':'ok','port':port,'size':archive.stat().st_size,
+                      'template_and_assets':'plan,v2,v3,standard','schema':'0006','fresh_rule':'V3','port':port,'size':archive.stat().st_size,
                       'sha256':sha256(archive.read_bytes()).hexdigest()}))
 
 

@@ -115,7 +115,7 @@ def test_single_winner_concurrent_claim_and_transfer_with_partial_decisions(clie
         assert assigned.get(P+path).json()['reviewer_id']==winner_id
         assert assigned.get(P+'/batches/'+batch['id']).json()['reviewer_id']==winner_id
         candidates=assigned.get(P+path+'/reviewers').json()
-        assert [u['id'] for u in candidates]==[other_id]
+        assert {u['id'] for u in candidates}=={other_id,steward.get(P+'/me').json()['user']['id']}
         assert post(assigned,path+'/transfer',{'revision':rev,'reviewer_id':batch['owner']}).status_code==422
         assert post(other,path+'/transfer',{'revision':rev,'reviewer_id':winner_id}).status_code==403
         assert post(assigned,path+'/reviews',{'revision':rev,'ids':[first],'decision':'REJECTED'}).status_code==422

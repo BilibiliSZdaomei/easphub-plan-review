@@ -14,7 +14,7 @@ from sqlalchemy.dialects import mysql
 STRING = String().with_variant(mysql.VARCHAR(255, charset='utf8mb4', collation='utf8mb4_0900_bin'), 'mysql')
 REAL = Float().with_variant(mysql.DOUBLE(), 'mysql')
 from .settings import data_directory, database_url
-SCHEMA_REVISION = '0005'
+SCHEMA_REVISION = '0006'
 
 ROOT=Path(__file__).resolve().parents[1]
 DATA=data_directory()

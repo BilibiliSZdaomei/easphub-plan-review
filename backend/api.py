@@ -16,8 +16,10 @@ from sqlalchemy.exc import IntegrityError
 from .db import *
 from .auth import login, public_user, authenticate, hash_token, role, scope, password_change
 from .api_common import context, once
+from .roles import has_role
 from .demo import seed_demo
 from .jobs import start_workers, FILES
+from .governance import effective_input, apply_governance
 from . import services as svc
 from .table_query import query_items, display_row, column_options, COLUMNS
 from .exceptions import confirmation
@@ -39,7 +41,7 @@ async def lifespan(app):
         workers[0].set()
         for t in workers[1]:t.join(timeout=2)
 
-app=FastAPI(title='计划审核',version='2.1.0',lifespan=lifespan,docs_url=BASE_PATH+'/api/docs' if DEPLOY_ENV=='local' else None,openapi_url=BASE_PATH+'/api/openapi.json',redoc_url=None)
+app=FastAPI(title='计划审核',version='2.2.0',lifespan=lifespan,docs_url=BASE_PATH+'/api/docs' if DEPLOY_ENV=='local' else None,openapi_url=BASE_PATH+'/api/openapi.json',redoc_url=None)
 PREFIX=API_PREFIX
 
 @app.middleware('http')
@@ -86,7 +88,7 @@ async def business_error(request,exc):
 @app.get(PREFIX+'/health')
 def health():
     ready=readiness()
-    return JSONResponse({'status':'ok' if ready else 'not_ready','app':'plan-review','version':'2.1.0','demo':DEMO,'database':engine.dialect.name},status_code=200 if ready else 503)
+    return JSONResponse({'status':'ok' if ready else 'not_ready','app':'plan-review','version':'2.2.0','demo':DEMO,'database':engine.dialect.name},status_code=200 if ready else 503)
 
 @app.get('/health/live')
 def health_live():return {'status':'ok','app':'plan-review'}
@@ -192,20 +194,28 @@ def version_activity(version_id:str,page:int=1,ctx=Depends(context,scope="functi
 @app.get(PREFIX+'/versions/{version_id}')
 def get_version(version_id:str,q:str='',filter:str='all',page:int=1,page_size:int=30,column_filters:str='{}',sort_key:str='',sort_direction:str='asc',include_batch_context:bool=False,ctx=Depends(context,scope="function")):
     db,user=ctx;batch,ver=svc.version_access(db,user,version_id,lock=False)
-    rows=query_items(ver.items,q,filter,column_filters,sort_key,sort_direction,reviewing='REVIEWER' in user.roles and ver.state in ('SUBMITTED','IN_REVIEW'),version_state=ver.state)
+    rows=query_items(ver.items,q,filter,column_filters,sort_key,sort_direction,reviewing=has_role(user,'REVIEWER') and ver.state in ('SUBMITTED','IN_REVIEW'),version_state=ver.state)
     page_size=max(1,min(page_size,100));page=max(page,1)
     rule=db.get(Rule,ver.rule_id);snap=db.get(Snapshot,ver.snapshot_id) if ver.snapshot_id else None;latest_rule=svc.active_rule(db,batch.warehouse)
     return {'id':ver.id,'seq':ver.seq,'revision':ver.revision,'state':ver.state,'batch_id':batch.id,'owner':batch.owner,
             **svc.assignment(db,batch,ver),
             **({'batch_current_id':batch.current_id,'batch_state':batch.state,'batch_updated_at':batch.updated_at} if include_batch_context else {}),
-            'items':[{**r,'table_values':display_row(r,ver.state)} for r in rows[(page-1)*page_size:page*page_size]],'total':len(rows),'summary':svc.summary(ver.items),
+            'items':[{**r,'input':effective_input(r),'table_values':display_row(r,ver.state)} for r in rows[(page-1)*page_size:page*page_size]],'total':len(rows),'summary':svc.summary(ver.items),
             'columns':[{'key':k,'label':label,'type':t} for k,label,t in COLUMNS],'column_options':column_options(ver.items,ver.state),
             'page':page,'page_size':page_size,'snapshot':{'id':snap.id,'name':snap.name,'as_of':snap.as_of,'basis':snap.basis,'net_mode':snap.net_mode} if snap else None,
-            'rule':{'id':rule.id,'name':rule.name,'published_at':rule.published_at,'params':rule.package['params'],'model':rule.package.get('model','0804')},
+            'rule':{'id':rule.id,'name':rule.name,'published_at':rule.published_at,'params':rule.package['params'],'model':rule.package.get('model','0804'),'has_material_basis':bool(rule.package.get('master_data') or rule.package.get('target_policy'))},
             'latest_rule_id':latest_rule.id,'latest_rule_name':latest_rule.name}
 
 def filter_items(items,q='',filter='all'):
     return query_items(items,q,filter)
+
+@app.get(PREFIX+'/versions/{version_id}/material-basis')
+def material_basis(version_id:str,code:str,ctx=Depends(context,scope="function")):
+    db,user=ctx
+    _,version=svc.version_access(db,user,version_id,lock=False)
+    svc.demand(0<len(code.strip())<=120,'请输入有效物料号')
+    _,basis=apply_governance({'material_code':code.strip()},db.get(Rule,version.rule_id).package)
+    return {'code':code.strip(),'basis':basis}
 
 @app.get(PREFIX+'/versions/{version_id}/items/{row_id}')
 def get_version_item(version_id:str,row_id:str,ctx=Depends(context,scope="function")):
@@ -213,12 +223,12 @@ def get_version_item(version_id:str,row_id:str,ctx=Depends(context,scope="functi
     _,version=svc.version_access(db,user,version_id,lock=False)
     row=next((item for item in version.items if item['id']==row_id),None)
     svc.demand(row is not None,'本版本没有这条计划行',404)
-    return {**row,'table_values':display_row(row,version.state)}
+    return {**row,'input':effective_input(row),'table_values':display_row(row,version.state)}
 
 @app.get(PREFIX+'/versions/{version_id}/selection')
 def select_rows(version_id:str,q:str='',filter:str='all',column_filters:str='{}',sort_key:str='',sort_direction:str='asc',ctx=Depends(context,scope="function")):
     db,user=ctx;batch,ver=svc.version_access(db,user,version_id,lock=False)
-    return {'ids':[r['id'] for r in query_items(ver.items,q,filter,column_filters,sort_key,sort_direction,reviewing='REVIEWER' in user.roles and ver.state in ('SUBMITTED','IN_REVIEW'),version_state=ver.state)]}
+    return {'ids':[r['id'] for r in query_items(ver.items,q,filter,column_filters,sort_key,sort_direction,reviewing=has_role(user,'REVIEWER') and ver.state in ('SUBMITTED','IN_REVIEW'),version_state=ver.state)]}
 
 @app.get(PREFIX+'/versions/{version_id}/confirmation')
 def get_confirmation(version_id:str,stage:str='submit',all:bool=False,ctx=Depends(context,scope="function")):

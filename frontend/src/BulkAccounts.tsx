@@ -69,7 +69,7 @@ export default function BulkAccounts({warehouses,roles,onClose,onDone}:Props){
    <button type="button" className="text-button" onClick={downloadTemplate}><Download size={15}/>下载模板</button>
   </div>
   <details className="rule-details"><summary>角色与仓库填法</summary>
-   <p>角色可填{Object.values(roles).join('、')}。多项用「、」分隔。初始密码 6–200 位。</p>
+   <p>角色可填{Object.values(roles).join('、')}，每人选一个。多个仓库用「、」分隔。初始密码 6–200 位。</p>
    <p>仓库可填名称或编码。{warehouses.map(w=>w.name+'（'+w.code+'）').join('、')}</p>
   </details>
   {rows.length>0&&<section><div className="panel-heading"><h2>账号预览</h2><span>{rows.length} 人{invalid>0?' · '+invalid+' 行需修改':''}</span></div>

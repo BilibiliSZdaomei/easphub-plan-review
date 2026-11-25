@@ -10,7 +10,7 @@ type DraftVersion = {
   latest_rule_id: string; latest_rule_name?: string
 }
 type Preview = {
-  revision: number; snapshot: Basis; rule: Basis; items: ChangedItem[]
+  revision: number; snapshot: Basis|null; rule: Basis; items: ChangedItem[]
   affected_count: number; quantity_changed_count: number; data_changed_count: number
 }
 
@@ -30,7 +30,7 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
   const [error,setError] = useState('')
   const [saving,setSaving] = useState(false)
   const savingRef = useRef(false)
-  const hasChange = !!snapshotId && (snapshotId !== currentSnapshotId || ruleId !== ver.rule.id)
+  const hasChange = (!!snapshotId || !currentSnapshotId) && (snapshotId !== currentSnapshotId || ruleId !== ver.rule.id)
   const path = '/versions/'+ver.id
 
   useEffect(()=>{
@@ -41,7 +41,7 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
       .then(data=>{
         if(!active)return
         setSnapshots(data)
-        if(!currentSnapshotId && data.length===1)setSnapshotId(data[0].id)
+
       })
       .catch(e=>{if(active)setOptionsError(e.message)})
       .finally(()=>{if(active)setLoading(false)})
@@ -57,7 +57,7 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
       try {
         const revision = attempt ? (await api(path+'?page_size=1')).revision : ver.revision
         if(!active)return
-        const data = await api<Preview>(path+'/snapshot-preview',{snapshot_id:snapshotId,rule_id:ruleId,revision})
+        const data = await api<Preview>(path+'/snapshot-preview',{snapshot_id:snapshotId||null,rule_id:ruleId,revision})
         if(active)setPreview(data)
       } catch(e:any) {
         if(active)setError(e.message)
@@ -69,7 +69,7 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
     return ()=>{active=false}
   },[path,snapshotId,ruleId,hasChange,ver.revision,attempt])
 
-  const ready = hasChange && preview && preview.snapshot.id===snapshotId && preview.rule.id===ruleId && !previewing
+  const ready = hasChange && preview && (preview.snapshot?.id||'')===snapshotId && preview.rule.id===ruleId && !previewing
   function close() { if(!savingRef.current)onClose() }
   async function save() {
     if(!ready || !preview || savingRef.current)return
@@ -77,7 +77,7 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
     setSaving(true)
     setError('')
     try {
-      await api(path+'/basis',{snapshot_id:preview.snapshot.id,rule_id:preview.rule.id,revision:preview.revision})
+      await api(path+'/basis',{snapshot_id:preview.snapshot?.id||null,rule_id:preview.rule.id,revision:preview.revision})
     } catch(e:any) {
       setPreview(null)
       setError(e.message)
@@ -91,14 +91,14 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
     }
   }
 
-  return <Modal title={currentSnapshotId?"更换计算依据":"关联数据快照"} onClose={close} wide>
+  return <Modal title="更换计算依据" onClose={close} wide>
     <div className="modal-body">
       {optionsError && <><Notice message={optionsError} tone="error"/><button className="text-button" type="button" onClick={()=>setOptionsAttempt(v=>v+1)}>重新加载快照</button></>}
       {loading ? <Busy text="读取快照…"/> :
         !optionsError && (snapshots.length>0
-          ? <SnapshotPicker snapshots={snapshots} value={snapshotId} disabled={saving} onChange={setSnapshotId}/>
-          : <Notice message="本仓暂无已发布的快照。数据维护员发布后，即可在这里关联。" tone="info"/>)}
-      {(snapshots.length>0 || !!currentSnapshotId) && <label>审核标准<select value={ruleId} disabled={saving || ver.latest_rule_id===ver.rule.id} onChange={e=>setRuleId(e.target.value)}>
+          ? <SnapshotPicker required={!!currentSnapshotId} emptyText={currentSnapshotId?'选择本仓快照':'使用计划自带数据'} snapshots={snapshots} value={snapshotId} disabled={saving} onChange={setSnapshotId}/>
+          : <Notice message="本计划使用自带的基础数据。" tone="info"/>)}
+      {<label>审核标准<select value={ruleId} disabled={saving || ver.latest_rule_id===ver.rule.id} onChange={e=>setRuleId(e.target.value)}>
         <option value={ver.rule.id}>{ver.rule.name}</option>
         {ver.latest_rule_id!==ver.rule.id && <option value={ver.latest_rule_id}>{ver.latest_rule_name || '仓库最新审核标准'}</option>}
       </select></label>}
@@ -108,7 +108,7 @@ export default function BasisDialog({ver,warehouse,onClose,onDone}: {
         <div className="change-summary" role="status"><strong>影响 {preview.affected_count} 行</strong><span>数量结论变化 {preview.quantity_changed_count} 行</span><span>数据状态变化 {preview.data_changed_count} 行</span></div>
         {preview.items.length>0 && <details className="basis-impact-detail"><summary>查看影响明细</summary><ChangeList key={snapshotId+ruleId} items={preview.items} columns={['当前','更换后']} filename="更换依据差异"/></details>}
       </section>}
-      <div className="modal-actions"><button type="button" className="secondary" disabled={saving} onClick={close}>{snapshots.length?'取消':'关闭'}</button>{snapshots.length>0&&<button type="button" className="primary" disabled={!ready || saving || !!optionsError} onClick={save}>{saving?'正在保存…':currentSnapshotId?'确认更换':'确认关联'}</button>}</div>
+      <div className="modal-actions"><button type="button" className="secondary" disabled={saving} onClick={close}>{snapshots.length?'取消':'关闭'}</button>{(snapshots.length>0||ver.latest_rule_id!==ver.rule.id)&&<button type="button" className="primary" disabled={!ready || saving || !!optionsError} onClick={save}>{saving?'正在保存…':'确认更换'}</button>}</div>
     </div>
   </Modal>
 }

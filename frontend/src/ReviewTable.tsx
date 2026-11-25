@@ -9,12 +9,12 @@ export const DEFAULT_COLUMNS = [
 ]
 const INVENTORY_COLUMNS = [
  ...IDENTITY_COLUMNS, 'on_hand_qty', 'in_transit_qty', 'on_order_qty', 'net_supply_before_plan',
- 'sea_plan_qty', 'air_plan_qty', 'future_qty', 'lower', 'upper', 'm', 'vehicle_parc', 'on_hand_months', 'future_days', 'delay_replenishment',
+ 'sea_plan_qty', 'air_plan_qty', 'future_qty', 'lower', 'upper', 'm', 'vehicle_parc', 'on_hand_months', 'future_days', 'delay_replenishment', 'turnover_warning',
 ]
 const ALL_COLUMNS = [
  ...IDENTITY_COLUMNS, 'material_abc', 'net_supply_before_plan', 'sea_plan_qty', 'air_plan_qty',
  'future_qty', 'lower', 'upper', 'status', 'attention', 'm', 'pipeline_days', 'future_days', 'is_key_model',
- 'avg_sales_3m', 'avg_sales_6m', 'fleet_qty', 'vehicle_model', 'vehicle_parc', 'on_hand_months', 'delay_replenishment', 'advice', 'source_note', 'on_hand_qty', 'in_transit_qty', 'on_order_qty',
+ 'avg_sales_3m', 'avg_sales_6m', 'fleet_qty', 'future_fleet_qty', 'turnover_warning', 'vehicle_model', 'vehicle_parc', 'on_hand_months', 'delay_replenishment', 'advice', 'source_note', 'on_hand_qty', 'in_transit_qty', 'on_order_qty',
  'replacement_rate', 'replacement_target', 'sales_target', 'decision', 'reason', 'air_reason', 'override',
 ]
 
@@ -90,7 +90,7 @@ export default function ReviewTable({ver,visible,state,onState,editable,reviewin
   if(col.key==='material_name')return <><button className="material-link" disabled={locked} onClick={()=>onDetail(row)}>{i.material_name||'—'}</button><small>{i.material_abc||'未分类'}{editable&&row.return_requested&&<em className="exception-tag">指定修改</em>}{row.submission_override&&row.submission_override.mode!=='advisory'&&<em className="exception-tag">带问题提交</em>}{d?.forced&&<em className="exception-tag">例外终审</em>}</small></>
   if(editable&&['sea_plan_qty','air_plan_qty'].includes(col.key))return <input className={'quantity-input '+(edits[row.id]?.[col.key]!==undefined?'edited':'')} aria-label={i.material_code+' '+col.label} disabled={busy} type="number" min="0" step={i.quantity_step||1} value={edits[row.id]?.[col.key]??i[col.key]??''} onChange={e=>setNumber(row.id,col.key,e.target.value)}/>
   if(['on_hand_months','pipeline_days','future_days'].includes(col.key)&&row.result.m==='0'&&'advice' in row.result)return <span className="muted">无销量</span>
-  if(col.key==='status'){const r=row.result;return <><Badge value={['ERROR','PENDING'].includes(r.data_status)?r.data_status:r.review_mode==='AUTO'?r.quantity_status:r.review_mode}/>{r.delay_replenishment&&<small className="text-coral">建议延迟补货</small>}</>}
+  if(col.key==='status'){const r=row.result;return <><Badge value={['ERROR','PENDING'].includes(r.data_status)?r.data_status:r.review_mode==='AUTO'?r.quantity_status:r.review_mode}/>{r.turnover_warning&&<small className="text-coral">{r.turnover_warning}</small>}{r.delay_replenishment&&<small className="text-coral">建议延迟补货</small>}</>}
   if(col.key==='decision'){
    const reason=row.return_requested?row.return_reason:d?.reason
    return <>{d?<Badge value={d.status} label={v}/>:row.return_requested?<Badge value="RETURNED" label="需修改"/>:<span className="muted">{v}</span>}

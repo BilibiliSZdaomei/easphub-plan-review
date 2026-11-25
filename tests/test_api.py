@@ -73,11 +73,11 @@ def ready(c):
     r=c.patch(P+'/versions/'+v['id']+'/items',json={'revision':v['revision'],'changes':edits});assert r.status_code==200,r.text
     v=c.get(P+'/versions/'+v['id']).json();return b,v
 
-def test_scope_csrf_and_admin_no_approval(clients):
+def test_scope_csrf_and_planner_no_approval(clients):
     p,r,a,s=clients;b,v=current(p)
     assert s.get(P+'/versions/'+v['id']).status_code==403
     assert s.get(P+'/batches/'+b['id']).status_code==403
-    assert post(a,'/versions/'+v['id']+'/finalize',{'revision':v['revision']}).status_code==403
+    assert post(p,'/versions/'+v['id']+'/finalize',{'revision':v['revision']}).status_code==403
     csrf=p.headers.pop('X-CSRF-Token')
     assert p.patch(P+'/versions/'+v['id']+'/items',json={'revision':1,'changes':[]}).status_code==403
 
@@ -134,7 +134,7 @@ def test_rule_publish_permission_proof_and_frozen_history(clients):
     edited=r.patch(P+'/rules/'+create['id'],json={'revision':create['revision'],'package':package}).json()
     proof=post(r,'/rules/'+create['id']+'/dry-run',{'revision':edited['revision'],'snapshot_id':v['snapshot']['id']})
     assert proof.status_code==200,proof.text
-    assert post(a,'/rules/'+create['id']+'/publish',{'revision':proof.json()['revision'],'reason':'test'}).status_code==403
+    assert post(p,'/rules/'+create['id']+'/publish',{'revision':proof.json()['revision'],'reason':'test'}).status_code==403
     published=post(r,'/rules/'+create['id']+'/publish',{'revision':proof.json()['revision'],'reason':'测试确认'});assert published.status_code==200,published.text
     assert p.get(P+'/versions/'+v['id']).json()['rule']['id']==base['id']
     assert r.patch(P+'/rules/'+create['id'],json={'revision':published.json()['revision'],'package':package}).status_code==409
